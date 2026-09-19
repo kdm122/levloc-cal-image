@@ -21,6 +21,14 @@ on:
         type: boolean
         required: true
         default: true
+      image_tag:
+        description: "Override the pushed image tag (blank = short SHA/ref)"
+        required: false
+        default: ""
+      ee:
+        description: "Enable EE features for dev/testing (bakes NEXT_PUBLIC_IS_E2E). '1' to enable, blank to disable."
+        required: false
+        default: ""
   schedule:
     # Monthly canary: build-only, verifies upstream main still compiles.
     - cron: "0 6 1 * *"
@@ -60,7 +68,10 @@ jobs:
           fi
           echo "full=$SHA" >> "$GITHUB_OUTPUT"
           echo "short=${SHA:0:7}" >> "$GITHUB_OUTPUT"
-          echo "Building calcom/cal.diy @ $SHA"
+          TAG_INPUT="${{ github.event.inputs.image_tag }}"
+          if [ -n "$TAG_INPUT" ]; then TAG="$TAG_INPUT"; else TAG="${SHA:0:7}"; fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Building calcom/cal.diy @ $SHA  ->  tag :$TAG  (ee='${{ github.event.inputs.ee }}')"
 
       - name: Clone upstream at pinned SHA
         run: |
@@ -85,12 +96,14 @@ jobs:
             echo 'ARG NEXT_PUBLIC_DISABLE_SIGNUP'
             echo 'ARG NEXT_PUBLIC_WEBSITE_URL'
             echo 'ARG NEXT_PUBLIC_VAPID_PUBLIC_KEY'
+            echo 'ARG NEXT_PUBLIC_IS_E2E'
             echo 'ENV NEXT_PUBLIC_APP_NAME=$NEXT_PUBLIC_APP_NAME \'
             echo '  NEXT_PUBLIC_COMPANY_NAME=$NEXT_PUBLIC_COMPANY_NAME \'
             echo '  NEXT_PUBLIC_SUPPORT_MAIL_ADDRESS=$NEXT_PUBLIC_SUPPORT_MAIL_ADDRESS \'
             echo '  NEXT_PUBLIC_DISABLE_SIGNUP=$NEXT_PUBLIC_DISABLE_SIGNUP \'
             echo '  NEXT_PUBLIC_WEBSITE_URL=$NEXT_PUBLIC_WEBSITE_URL \'
-            echo '  NEXT_PUBLIC_VAPID_PUBLIC_KEY=$NEXT_PUBLIC_VAPID_PUBLIC_KEY'
+            echo '  NEXT_PUBLIC_VAPID_PUBLIC_KEY=$NEXT_PUBLIC_VAPID_PUBLIC_KEY \'
+            echo '  NEXT_PUBLIC_IS_E2E=$NEXT_PUBLIC_IS_E2E'
           } > /tmp/inject.txt
           # Insert that block immediately before the anchor COPY line.
           awk -v anchor="$ANCHOR" 'index($0,anchor) && !d { while ((getline l < "/tmp/inject.txt") > 0) print l; d=1 } { print }' Dockerfile > Dockerfile.patched
@@ -129,8 +142,7 @@ jobs:
           network: host
           push: ${{ github.event_name == 'workflow_dispatch' && inputs.push }}
           tags: |
-            ghcr.io/${{ github.repository_owner }}/cal.diy:${{ steps.sha.outputs.short }}
-            ghcr.io/${{ github.repository_owner }}/cal.diy:${{ steps.sha.outputs.full }}
+            ghcr.io/${{ github.repository_owner }}/cal.diy:${{ steps.sha.outputs.tag }}
             ghcr.io/${{ github.repository_owner }}/cal.diy:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -147,6 +159,7 @@ jobs:
             NEXT_PUBLIC_SUPPORT_MAIL_ADDRESS=info@levloc.com
             NEXT_PUBLIC_DISABLE_SIGNUP=true
             NEXT_PUBLIC_VAPID_PUBLIC_KEY=${{ env.VAPID_PUBLIC_KEY }}
+            NEXT_PUBLIC_IS_E2E=${{ github.event.inputs.ee }}
             DATABASE_URL=postgresql://unicorn_user:magical_password@localhost:5432/calendso
             DATABASE_DIRECT_URL=postgresql://unicorn_user:magical_password@localhost:5432/calendso
 
@@ -155,4 +168,4 @@ jobs:
           echo "### Built ghcr.io/${{ github.repository_owner }}/cal.diy" >> "$GITHUB_STEP_SUMMARY"
           echo "- upstream SHA: \`${{ steps.sha.outputs.full }}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- pushed: \`${{ github.event_name == 'workflow_dispatch' && inputs.push }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- tag to deploy on Railway: \`ghcr.io/${{ github.repository_owner }}/cal.diy:${{ steps.sha.outputs.short }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- tag to deploy on Railway: \`ghcr.io/${{ github.repository_owner }}/cal.diy:${{ steps.sha.outputs.tag }}\`" >> "$GITHUB_STEP_SUMMARY"
