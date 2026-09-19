@@ -1,0 +1,148 @@
+name: build-cal-diy-image
+
+# Builds calcom/cal.diy at a pinned commit SHA and pushes to
+# ghcr.io/<owner>/cal.diy. Nothing secret lives in this repo: build-time
+# NEXTAUTH_SECRET / CALENDSO_ENCRYPTION_KEY keep the Dockerfile's "secret"
+# placeholder, and the throwaway Postgres creds are meaningless.
+#
+# This repo must be PUBLIC: public repos get free ubuntu-latest 4-core/16GB
+# runners with unlimited minutes, which is enough for this build. Private
+# repos only get 2-core/7GB runners, which OOM here.
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_sha:
+        description: "calcom/cal.diy commit SHA to build"
+        required: true
+        default: "6bc45298226f96ff79e0c070c8b2ce39727e8477"
+      push:
+        description: "Push image to GHCR (uncheck to build-only)"
+        type: boolean
+        required: true
+        default: true
+  schedule:
+    # Monthly canary: build-only, verifies upstream main still compiles.
+    - cron: "0 6 1 * *"
+
+env:
+  WEBAPP_URL: "https://cal.levloc.com"
+  VAPID_PUBLIC_KEY: "BMP77QZK_4cK-mHCNX1q7-Vnf72LfD6Zp96-aBQvYTzu_a1gPUY1RoO7XhQn2WBdh3JuL4iQuftiLwPW8ejt_ao"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: unicorn_user
+          POSTGRES_PASSWORD: magical_password
+          POSTGRES_DB: calendso
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U unicorn_user"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - name: Resolve SHA (scheduled runs use upstream main HEAD)
+        id: sha
+        run: |
+          if [ -n "${{ github.event.inputs.upstream_sha }}" ]; then
+            SHA="${{ github.event.inputs.upstream_sha }}"
+          else
+            SHA="$(git ls-remote https://github.com/calcom/cal.diy.git refs/heads/main | cut -f1)"
+          fi
+          echo "full=$SHA" >> "$GITHUB_OUTPUT"
+          echo "short=${SHA:0:7}" >> "$GITHUB_OUTPUT"
+          echo "Building calcom/cal.diy @ $SHA"
+
+      - name: Clone upstream at pinned SHA
+        run: |
+          git clone --filter=blob:none https://github.com/calcom/cal.diy.git src
+          git -C src checkout "${{ steps.sha.outputs.full }}"
+
+      - name: Inject branding NEXT_PUBLIC_* build args into Dockerfile
+        working-directory: src
+        run: |
+          set -euo pipefail
+          ANCHOR='COPY package.json yarn.lock .yarnrc.yml playwright.config.ts turbo.json i18n.json ./'
+          if ! grep -qF "$ANCHOR" Dockerfile; then
+            echo "::error::Dockerfile anchor not found - upstream layout changed. Update build.yml patch." >&2
+            exit 1
+          fi
+          cat > /tmp/inject.txt <<'EOF'
+ARG NEXT_PUBLIC_APP_NAME
+ARG NEXT_PUBLIC_COMPANY_NAME
+ARG NEXT_PUBLIC_SUPPORT_MAIL_ADDRESS
+ARG NEXT_PUBLIC_DISABLE_SIGNUP
+ARG NEXT_PUBLIC_WEBSITE_URL
+ARG NEXT_PUBLIC_VAPID_PUBLIC_KEY
+ENV NEXT_PUBLIC_APP_NAME=$NEXT_PUBLIC_APP_NAME \
+  NEXT_PUBLIC_COMPANY_NAME=$NEXT_PUBLIC_COMPANY_NAME \
+  NEXT_PUBLIC_SUPPORT_MAIL_ADDRESS=$NEXT_PUBLIC_SUPPORT_MAIL_ADDRESS \
+  NEXT_PUBLIC_DISABLE_SIGNUP=$NEXT_PUBLIC_DISABLE_SIGNUP \
+  NEXT_PUBLIC_WEBSITE_URL=$NEXT_PUBLIC_WEBSITE_URL \
+  NEXT_PUBLIC_VAPID_PUBLIC_KEY=$NEXT_PUBLIC_VAPID_PUBLIC_KEY
+EOF
+          # Insert the block immediately before the anchor COPY line.
+          awk -v anchor="$ANCHOR" '
+            $0 ~ anchor && !done { while ((getline line < "/tmp/inject.txt") > 0) print line; done=1 }
+            { print }
+          ' Dockerfile > Dockerfile.patched
+          mv Dockerfile.patched Dockerfile
+          echo "----- patched builder stage -----"
+          sed -n '1,45p' Dockerfile
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.push }}
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build (and push) image
+        uses: docker/build-push-action@v6
+        with:
+          context: src
+          file: src/Dockerfile
+          platforms: linux/amd64
+          network: host
+          push: ${{ github.event_name == 'workflow_dispatch' && inputs.push }}
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/cal.diy:${{ steps.sha.outputs.short }}
+            ghcr.io/${{ github.repository_owner }}/cal.diy:${{ steps.sha.outputs.full }}
+            ghcr.io/${{ github.repository_owner }}/cal.diy:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            NEXT_PUBLIC_WEBAPP_URL=${{ env.WEBAPP_URL }}
+            NEXT_PUBLIC_WEBSITE_URL=${{ env.WEBAPP_URL }}
+            NEXT_PUBLIC_LICENSE_CONSENT=agree
+            NEXT_PUBLIC_WEBSITE_TERMS_URL=https://levloc.com
+            NEXT_PUBLIC_WEBSITE_PRIVACY_POLICY_URL=https://levloc.com
+            CALCOM_TELEMETRY_DISABLED=1
+            MAX_OLD_SPACE_SIZE=8192
+            NEXT_PUBLIC_APP_NAME=Leverage Local Scheduling
+            NEXT_PUBLIC_COMPANY_NAME=Leverage Local
+            NEXT_PUBLIC_SUPPORT_MAIL_ADDRESS=info@levloc.com
+            NEXT_PUBLIC_DISABLE_SIGNUP=true
+            NEXT_PUBLIC_VAPID_PUBLIC_KEY=${{ env.VAPID_PUBLIC_KEY }}
+            DATABASE_URL=postgresql://unicorn_user:magical_password@localhost:5432/calendso
+            DATABASE_DIRECT_URL=postgresql://unicorn_user:magical_password@localhost:5432/calendso
+
+      - name: Summary
+        run: |
+          echo "### Built ghcr.io/${{ github.repository_owner }}/cal.diy" >> "$GITHUB_STEP_SUMMARY"
+          echo "- upstream SHA: \`${{ steps.sha.outputs.full }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- pushed: \`${{ github.event_name == 'workflow_dispatch' && inputs.push }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- tag to deploy on Railway: \`ghcr.io/${{ github.repository_owner }}/cal.diy:${{ steps.sha.outputs.short }}\`" >> "$GITHUB_STEP_SUMMARY"
