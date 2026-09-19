@@ -26,7 +26,7 @@ on:
         required: false
         default: ""
       ee:
-        description: "Enable EE features for dev/testing (bakes NEXT_PUBLIC_IS_E2E). '1' to enable, blank to disable."
+        description: "Unlock EE (Teams/Orgs) for DEV/TESTING by making the license check pass. '1' to enable, blank to disable. Requires a real CALCOM_LICENSE_KEY before production."
         required: false
         default: ""
   schedule:
@@ -96,14 +96,12 @@ jobs:
             echo 'ARG NEXT_PUBLIC_DISABLE_SIGNUP'
             echo 'ARG NEXT_PUBLIC_WEBSITE_URL'
             echo 'ARG NEXT_PUBLIC_VAPID_PUBLIC_KEY'
-            echo 'ARG NEXT_PUBLIC_IS_E2E'
             echo 'ENV NEXT_PUBLIC_APP_NAME=$NEXT_PUBLIC_APP_NAME \'
             echo '  NEXT_PUBLIC_COMPANY_NAME=$NEXT_PUBLIC_COMPANY_NAME \'
             echo '  NEXT_PUBLIC_SUPPORT_MAIL_ADDRESS=$NEXT_PUBLIC_SUPPORT_MAIL_ADDRESS \'
             echo '  NEXT_PUBLIC_DISABLE_SIGNUP=$NEXT_PUBLIC_DISABLE_SIGNUP \'
             echo '  NEXT_PUBLIC_WEBSITE_URL=$NEXT_PUBLIC_WEBSITE_URL \'
-            echo '  NEXT_PUBLIC_VAPID_PUBLIC_KEY=$NEXT_PUBLIC_VAPID_PUBLIC_KEY \'
-            echo '  NEXT_PUBLIC_IS_E2E=$NEXT_PUBLIC_IS_E2E'
+            echo '  NEXT_PUBLIC_VAPID_PUBLIC_KEY=$NEXT_PUBLIC_VAPID_PUBLIC_KEY'
           } > /tmp/inject.txt
           # Insert that block immediately before the anchor COPY line.
           awk -v anchor="$ANCHOR" 'index($0,anchor) && !d { while ((getline l < "/tmp/inject.txt") > 0) print l; d=1 } { print }' Dockerfile > Dockerfile.patched
@@ -121,6 +119,29 @@ jobs:
           awk '/export default \(phase: string\): NextConfig => plugins\.reduce/{print "export default (phase: string): NextConfig => {"; print "  const __cfg = plugins.reduce((acc, plugin) => plugin(acc), nextConfig(phase));"; print "  return { ...__cfg, typescript: { ...(__cfg.typescript || {}), ignoreBuildErrors: true }, eslint: { ...(__cfg.eslint || {}), ignoreDuringBuilds: true } };"; print "};"; next} {print}' "$CFG" > "$CFG.tmp"
           mv "$CFG.tmp" "$CFG"
           echo "----- patched export -----"; tail -6 "$CFG"
+
+      # DEV/TESTING ONLY: make the EE license check pass so Teams/Orgs are usable
+      # without a subscription. The Cal.com Commercial License permits use/modification
+      # "for development and testing purposes, without requiring a subscription."
+      # A real CALCOM_LICENSE_KEY must be set before any production use.
+      # This is preferred over NEXT_PUBLIC_IS_E2E=1, which also empties the calendar/app maps.
+      - name: Unlock EE for dev/testing (license check)
+        if: ${{ github.event.inputs.ee == '1' }}
+        working-directory: src
+        run: |
+          set -euo pipefail
+          F=packages/features/ee/common/server/LicenseKeyService.ts
+          test -f "$F"
+          LINE='return Promise.resolve(process.env.NEXT_PUBLIC_IS_E2E === "1");'
+          COUNT=$(grep -cF "$LINE" "$F" || true)
+          if [ "$COUNT" != "1" ]; then
+            echo "::error::Expected exactly 1 NoopLicenseKeyService.checkLicense line, found $COUNT - update this patch" >&2
+            exit 1
+          fi
+          # Replace only the Noop implementation's return (used when no CALCOM_LICENSE_KEY is set).
+          # '#' sed delimiter avoids the slashes in the replacement comment.
+          sed -i 's#return Promise.resolve(process.env.NEXT_PUBLIC_IS_E2E === "1");#return Promise.resolve(true); /* dev/testing EE unlock */#' "$F"
+          grep -nF "dev/testing EE unlock" "$F"
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
@@ -159,7 +180,6 @@ jobs:
             NEXT_PUBLIC_SUPPORT_MAIL_ADDRESS=info@levloc.com
             NEXT_PUBLIC_DISABLE_SIGNUP=true
             NEXT_PUBLIC_VAPID_PUBLIC_KEY=${{ env.VAPID_PUBLIC_KEY }}
-            NEXT_PUBLIC_IS_E2E=${{ github.event.inputs.ee }}
             DATABASE_URL=postgresql://unicorn_user:magical_password@localhost:5432/calendso
             DATABASE_DIRECT_URL=postgresql://unicorn_user:magical_password@localhost:5432/calendso
 
