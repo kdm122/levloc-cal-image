@@ -76,28 +76,27 @@ jobs:
             echo "::error::Dockerfile anchor not found - upstream layout changed. Update build.yml patch." >&2
             exit 1
           fi
-          cat > /tmp/inject.txt <<'EOF'
-ARG NEXT_PUBLIC_APP_NAME
-ARG NEXT_PUBLIC_COMPANY_NAME
-ARG NEXT_PUBLIC_SUPPORT_MAIL_ADDRESS
-ARG NEXT_PUBLIC_DISABLE_SIGNUP
-ARG NEXT_PUBLIC_WEBSITE_URL
-ARG NEXT_PUBLIC_VAPID_PUBLIC_KEY
-ENV NEXT_PUBLIC_APP_NAME=$NEXT_PUBLIC_APP_NAME \
-  NEXT_PUBLIC_COMPANY_NAME=$NEXT_PUBLIC_COMPANY_NAME \
-  NEXT_PUBLIC_SUPPORT_MAIL_ADDRESS=$NEXT_PUBLIC_SUPPORT_MAIL_ADDRESS \
-  NEXT_PUBLIC_DISABLE_SIGNUP=$NEXT_PUBLIC_DISABLE_SIGNUP \
-  NEXT_PUBLIC_WEBSITE_URL=$NEXT_PUBLIC_WEBSITE_URL \
-  NEXT_PUBLIC_VAPID_PUBLIC_KEY=$NEXT_PUBLIC_VAPID_PUBLIC_KEY
-EOF
-          # Insert the block immediately before the anchor COPY line.
-          awk -v anchor="$ANCHOR" '
-            $0 ~ anchor && !done { while ((getline line < "/tmp/inject.txt") > 0) print line; done=1 }
-            { print }
-          ' Dockerfile > Dockerfile.patched
+          # Build the ARG/ENV block to insert (indented so it stays inside
+          # the YAML block scalar; single quotes keep $VARS + trailing \ literal).
+          {
+            echo 'ARG NEXT_PUBLIC_APP_NAME'
+            echo 'ARG NEXT_PUBLIC_COMPANY_NAME'
+            echo 'ARG NEXT_PUBLIC_SUPPORT_MAIL_ADDRESS'
+            echo 'ARG NEXT_PUBLIC_DISABLE_SIGNUP'
+            echo 'ARG NEXT_PUBLIC_WEBSITE_URL'
+            echo 'ARG NEXT_PUBLIC_VAPID_PUBLIC_KEY'
+            echo 'ENV NEXT_PUBLIC_APP_NAME=$NEXT_PUBLIC_APP_NAME \'
+            echo '  NEXT_PUBLIC_COMPANY_NAME=$NEXT_PUBLIC_COMPANY_NAME \'
+            echo '  NEXT_PUBLIC_SUPPORT_MAIL_ADDRESS=$NEXT_PUBLIC_SUPPORT_MAIL_ADDRESS \'
+            echo '  NEXT_PUBLIC_DISABLE_SIGNUP=$NEXT_PUBLIC_DISABLE_SIGNUP \'
+            echo '  NEXT_PUBLIC_WEBSITE_URL=$NEXT_PUBLIC_WEBSITE_URL \'
+            echo '  NEXT_PUBLIC_VAPID_PUBLIC_KEY=$NEXT_PUBLIC_VAPID_PUBLIC_KEY'
+          } > /tmp/inject.txt
+          # Insert that block immediately before the anchor COPY line.
+          awk -v anchor="$ANCHOR" 'index($0,anchor) && !d { while ((getline l < "/tmp/inject.txt") > 0) print l; d=1 } { print }' Dockerfile > Dockerfile.patched
           mv Dockerfile.patched Dockerfile
           echo "----- patched builder stage -----"
-          sed -n '1,45p' Dockerfile
+          sed -n '1,50p' Dockerfile
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
