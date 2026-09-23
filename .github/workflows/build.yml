@@ -58,6 +58,9 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     steps:
+      - name: Checkout builder repo (for assets/ and patches)
+        uses: actions/checkout@v4
+
       - name: Resolve SHA (scheduled runs use upstream main HEAD)
         id: sha
         run: |
@@ -119,6 +122,52 @@ jobs:
           awk '/export default \(phase: string\): NextConfig => plugins\.reduce/{print "export default (phase: string): NextConfig => {"; print "  const __cfg = plugins.reduce((acc, plugin) => plugin(acc), nextConfig(phase));"; print "  return { ...__cfg, typescript: { ...(__cfg.typescript || {}), ignoreBuildErrors: true }, eslint: { ...(__cfg.eslint || {}), ignoreDuringBuilds: true } };"; print "};"; next} {print}' "$CFG" > "$CFG.tmp"
           mv "$CFG.tmp" "$CFG"
           echo "----- patched export -----"; tail -6 "$CFG"
+
+      - name: Swap favicon/icons to Leverage Local branding
+        working-directory: src
+        run: |
+          set -euo pipefail
+          SRC="$GITHUB_WORKSPACE/assets/ll_icon.png"
+          test -f "$SRC"
+          if ! command -v convert >/dev/null 2>&1; then sudo apt-get update && sudo apt-get install -y imagemagick; fi
+          P=apps/web/public
+          convert "$SRC" -resize 16x16   "$P/favicon-16x16.png"
+          convert "$SRC" -resize 32x32   "$P/favicon-32x32.png"
+          convert "$SRC" -resize 180x180 "$P/apple-touch-icon.png"
+          convert "$SRC" -resize 192x192 "$P/android-chrome-192x192.png"
+          convert "$SRC" -resize 256x256 "$P/android-chrome-256x256.png"
+          convert "$SRC" -resize 384x384 "$P/android-chrome-384x384.png"
+          convert "$SRC" -resize 512x512 "$P/android-chrome-512x512.png"
+          convert "$SRC" -resize 70x70   "$P/mstile-70x70.png"
+          convert "$SRC" -resize 144x144 "$P/mstile-144x144.png"
+          convert "$SRC" -resize 150x150 "$P/mstile-150x150.png"
+          convert "$SRC" -resize 310x310 "$P/mstile-310x310.png"
+          convert "$SRC" -background none -resize 310x150 -gravity center -extent 310x150 "$P/mstile-310x150.png"
+          convert "$SRC" -define icon:auto-resize=16,32,48 "$P/favicon.ico"
+          cp "$P/favicon.ico" apps/web/app/favicon.ico
+          echo "favicon assets replaced"
+
+      - name: Make login OAuth-only (hide credentials form; ?password=1 reveals it for recovery)
+        working-directory: src
+        run: |
+          set -euo pipefail
+          F=apps/web/modules/auth/login-view.tsx
+          test -f "$F"
+          grep -qF 'data-testid="login-form">' "$F" || { echo "::error::login-form anchor changed - update patch" >&2; exit 1; }
+          grep -qF '{(isGoogleLoginEnabled || displaySSOLogin) && (' "$F" || { echo "::error::login divider anchor changed - update patch" >&2; exit 1; }
+          sed -i 's#data-testid="login-form">#data-testid="login-form" hidden={!searchParams?.get("password")} style={!searchParams?.get("password") ? { display: "none" } : undefined}>#' "$F"
+          sed -i 's#{(isGoogleLoginEnabled || displaySSOLogin) \&\& (#{false \&\& (isGoogleLoginEnabled || displaySSOLogin) \&\& (#' "$F"
+          grep -nF 'hidden={!searchParams' "$F"
+
+      - name: Default conferencing = Google Meet (new event types)
+        working-directory: src
+        run: |
+          set -euo pipefail
+          F=packages/app-store/_utils/getDefaultLocations.ts
+          test -f "$F"
+          grep -qF 'const appKeys = await getAppKeysFromSlug("daily-video");' "$F" || { echo "::error::getDefaultLocations fallback changed - update patch" >&2; exit 1; }
+          perl -0pi -e 's/const appKeys = await getAppKeysFromSlug\("daily-video"\);\s*\n\s*if \(typeof appKeys\.api_key === "string"\) \{\s*\n\s*return \[\{ type: DailyLocationType \}\];\s*\n\s*\}\s*\n\s*return \[\];/return [{ type: "integrations:google:meet" }];/s' "$F"
+          grep -nF 'integrations:google:meet' "$F"
 
       # DEV/TESTING ONLY: make the EE license check pass so Teams/Orgs are usable
       # without a subscription. The Cal.com Commercial License permits use/modification
