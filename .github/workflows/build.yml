@@ -169,6 +169,16 @@ jobs:
           perl -0pi -e 's/const appKeys = await getAppKeysFromSlug\("daily-video"\);\s*\n\s*if \(typeof appKeys\.api_key === "string"\) \{\s*\n\s*return \[\{ type: DailyLocationType \}\];\s*\n\s*\}\s*\n\s*return \[\];/return [{ type: "integrations:google:meet" }];/s' "$F"
           grep -nF 'integrations:google:meet' "$F"
 
+      - name: Remove workflow SMS/WhatsApp credit requirement (self-hosted)
+        working-directory: src
+        run: |
+          set -euo pipefail
+          F=packages/features/ee/workflows/lib/getOptions.ts
+          test -f "$F"
+          grep -qF 'needsCredits: (!isOrgsPlan && isSMSOrWhatsappAction(action)) || isCalAIAction(action),' "$F" || { echo "::error::getOptions needsCredits anchor changed - update patch" >&2; exit 1; }
+          sed -i 's#needsCredits: (!isOrgsPlan && isSMSOrWhatsappAction(action)) || isCalAIAction(action),#needsCredits: false,#' "$F"
+          grep -nF 'needsCredits: false,' "$F"
+
       # DEV/TESTING ONLY: make the EE license check pass so Teams/Orgs are usable
       # without a subscription. The Cal.com Commercial License permits use/modification
       # "for development and testing purposes, without requiring a subscription."
