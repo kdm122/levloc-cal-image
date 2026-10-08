@@ -1,0 +1,100 @@
+name: build-cal-diy-api-image
+
+# Builds the Cal.com API v2 (apps/api/v2, NestJS) from calcom/cal.diy at a
+# pinned commit SHA and pushes to ghcr.io/<owner>/cal.diy-api.
+#
+# Keep upstream_sha identical to the web image (build.yml) so both services
+# share one Prisma schema. The web service runs migrations; API v2 does not.
+#
+# No branding, login or EE patches: cal.diy's API v2 has no license gate.
+# Same runner note as build.yml: this repo must stay PUBLIC for the
+# 4-core/16GB runners.
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_sha:
+        description: "calcom/cal.diy commit SHA to build (match build.yml)"
+        required: true
+        default: "6bc45298226f96ff79e0c070c8b2ce39727e8477"
+      push:
+        description: "Push image to GHCR (uncheck to build-only)"
+        type: boolean
+        required: true
+        default: true
+      image_tag:
+        description: "Override the pushed image tag (blank = short SHA)"
+        required: false
+        default: ""
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: unicorn_user
+          POSTGRES_PASSWORD: magical_password
+          POSTGRES_DB: calendso
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U unicorn_user"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - name: Resolve SHA and tag
+        id: sha
+        run: |
+          SHA="${{ github.event.inputs.upstream_sha }}"
+          echo "full=$SHA" >> "$GITHUB_OUTPUT"
+          TAG_INPUT="${{ github.event.inputs.image_tag }}"
+          if [ -n "$TAG_INPUT" ]; then TAG="$TAG_INPUT"; else TAG="${SHA:0:7}"; fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Building calcom/cal.diy apps/api/v2 @ $SHA  ->  tag :$TAG"
+
+      - name: Clone upstream at pinned SHA
+        run: |
+          git clone --filter=blob:none https://github.com/calcom/cal.diy.git src
+          git -C src checkout "${{ steps.sha.outputs.full }}"
+          test -f src/apps/api/v2/Dockerfile || { echo "::error::apps/api/v2/Dockerfile missing at this SHA" >&2; exit 1; }
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: ${{ inputs.push }}
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build (and push) image
+        uses: docker/build-push-action@v6
+        with:
+          context: src
+          file: src/apps/api/v2/Dockerfile
+          platforms: linux/amd64
+          network: host
+          push: ${{ inputs.push }}
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/cal.diy-api:${{ steps.sha.outputs.tag }}
+            ghcr.io/${{ github.repository_owner }}/cal.diy-api:latest
+          cache-from: type=gha,scope=api
+          cache-to: type=gha,mode=max,scope=api
+          build-args: |
+            DATABASE_URL=postgresql://unicorn_user:magical_password@localhost:5432/calendso
+            DATABASE_DIRECT_URL=postgresql://unicorn_user:magical_password@localhost:5432/calendso
+
+      - name: Summary
+        run: |
+          echo "### Built ghcr.io/${{ github.repository_owner }}/cal.diy-api" >> "$GITHUB_STEP_SUMMARY"
+          echo "- upstream SHA: \`${{ steps.sha.outputs.full }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- pushed: \`${{ inputs.push }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- tag to deploy on Railway: \`ghcr.io/${{ github.repository_owner }}/cal.diy-api:${{ steps.sha.outputs.tag }}\`" >> "$GITHUB_STEP_SUMMARY"
