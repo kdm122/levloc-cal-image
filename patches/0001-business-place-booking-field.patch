@@ -228,10 +228,10 @@ index 5c65073..529c1ac 100644
        renderComponent({ formBuilderProps: mockProps, formDefaultValues: {} });
 diff --git a/apps/web/modules/form-builder/components/BusinessPlaceInput.test.tsx b/apps/web/modules/form-builder/components/BusinessPlaceInput.test.tsx
 new file mode 100644
-index 0000000..4b431a1
+index 0000000..ba5944f
 --- /dev/null
 +++ b/apps/web/modules/form-builder/components/BusinessPlaceInput.test.tsx
-@@ -0,0 +1,197 @@
+@@ -0,0 +1,208 @@
 +import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 +import { useState } from "react";
 +import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -350,19 +350,24 @@ index 0000000..4b431a1
 +
 +    // Optimistic value from the prediction...
 +    expect(onSetValue).toHaveBeenCalledWith({
-+      value: "Acme Plumbing — 1 Main St, Austin, TX",
++      value: "Acme Plumbing - Austin, TX",
 +      name: "Acme Plumbing",
 +      address: "1 Main St, Austin, TX",
++      city: "Austin",
++      state: "TX",
 +      placeId: PLACE_ID,
 +    });
++    expect(await screen.findByText("Acme Plumbing - Austin, TX")).toBeInTheDocument();
 +
 +    // ...then enriched with Place Details, reusing the autocomplete session token.
 +    await waitFor(() =>
 +      expect(onSetValue).toHaveBeenLastCalledWith({
-+        value: "Acme Plumbing — 1 Main St, Austin, TX 78701, USA",
++        value: "Acme Plumbing - Austin, TX",
 +        name: "Acme Plumbing",
 +        placeId: PLACE_ID,
 +        address: "1 Main St, Austin, TX 78701, USA",
++        city: "Austin",
++        state: "TX",
 +        phone: "+1 512-555-0100",
 +        website: "https://acme.example/",
 +        mapsUrl: "https://maps.google.com/?cid=1",
@@ -403,15 +408,21 @@ index 0000000..4b431a1
 +    expect(onSetValue).toHaveBeenLastCalledWith("");
 +  });
 +
-+  it("shows an existing value and clears it", async () => {
++  it("shows an existing value in the 'Name - City, ST' format and clears it", async () => {
 +    const onSetValue = vi.fn();
 +    const { container } = render(
 +      <Harness
-+        initialValue={{ value: "Acme Plumbing — 1 Main St", name: "Acme Plumbing", placeId: PLACE_ID }}
++        // Saved before the summary format changed
++        initialValue={{
++          value: "Acme Plumbing — 1 Main St, Austin, TX 78701, USA",
++          name: "Acme Plumbing",
++          address: "1 Main St, Austin, TX 78701, USA",
++          placeId: PLACE_ID,
++        }}
 +        onSetValue={onSetValue}
 +      />
 +    );
-+    expect(screen.getByText("Acme Plumbing — 1 Main St")).toBeInTheDocument();
++    expect(screen.getByText("Acme Plumbing - Austin, TX")).toBeInTheDocument();
 +
 +    const input = getSearchInput(container);
 +    fireEvent.focus(input);
@@ -431,16 +442,15 @@ index 0000000..4b431a1
 +});
 diff --git a/apps/web/modules/form-builder/components/BusinessPlaceInput.tsx b/apps/web/modules/form-builder/components/BusinessPlaceInput.tsx
 new file mode 100644
-index 0000000..c3ed133
+index 0000000..b3c7fa7
 --- /dev/null
 +++ b/apps/web/modules/form-builder/components/BusinessPlaceInput.tsx
-@@ -0,0 +1,331 @@
+@@ -0,0 +1,330 @@
 +import { useEffect, useMemo, useRef, useState } from "react";
 +import type { FormatOptionLabelMeta, InputActionMeta, SingleValue } from "react-select";
 +
 +import {
 +  type BusinessPlaceValue,
-+  buildBusinessPlaceSummary,
 +  isBusinessPlaceValue,
 +  normalizeBusinessPlace,
 +} from "@calcom/lib/bookings/businessPlace";
@@ -482,7 +492,8 @@ index 0000000..c3ed133
 +}
 +
 +function toSelected(value: BusinessPlaceInputProps["value"]): BusinessPlaceValue | null {
-+  if (isBusinessPlaceValue(value)) return value;
++  // Re-normalise so answers saved with an older summary format still display as "Name - City, ST"
++  if (isBusinessPlaceValue(value)) return normalizeBusinessPlace(value) || null;
 +  if (typeof value === "string" && value.trim()) return { value: value.trim(), name: value.trim() };
 +  return null;
 +}
@@ -610,12 +621,12 @@ index 0000000..c3ed133
 +        const placeName = typeof place.name === "string" && place.name ? place.name : suggestion.mainText;
 +        const address =
 +          typeof place.address === "string" && place.address ? place.address : suggestion.secondaryText;
++        // The normaliser builds the "Name - City, ST" summary from city/state (or the address)
 +        const full = normalizeBusinessPlace({
 +          ...place,
 +          placeId: suggestion.placeId,
 +          name: placeName,
 +          address,
-+          value: buildBusinessPlaceSummary(placeName, address),
 +        });
 +        if (full) setValue(full);
 +      })
@@ -749,7 +760,6 @@ index 0000000..c3ed133
 +          updateInput("");
 +          setSuggestions([]);
 +          const optimistic = normalizeBusinessPlace({
-+            value: buildBusinessPlaceSummary(suggestion.mainText, suggestion.secondaryText),
 +            name: suggestion.mainText,
 +            address: suggestion.secondaryText,
 +            placeId: suggestion.placeId,
@@ -863,10 +873,10 @@ index 0934b6f..f812cb8 100644
      return (
        <WithLabel field={field} htmlFor={field.name} readOnly={readOnly} noLabel={noLabel}>
 diff --git a/packages/features/bookings/lib/getBookingResponsesSchema.test.ts b/packages/features/bookings/lib/getBookingResponsesSchema.test.ts
-index 2f16bbf..3a5bef5 100644
+index 2f16bbf..7af4500 100644
 --- a/packages/features/bookings/lib/getBookingResponsesSchema.test.ts
 +++ b/packages/features/bookings/lib/getBookingResponsesSchema.test.ts
-@@ -2521,3 +2521,205 @@ describe("getBookingResponsesPartialSchema - Prefill validation", () => {
+@@ -2521,3 +2521,215 @@ describe("getBookingResponsesPartialSchema - Prefill validation", () => {
      expect(parsedResponses.success).toBe(true);
    });
  });
@@ -891,7 +901,7 @@ index 2f16bbf..3a5bef5 100644
 +        value: "Acme Plumbing — 1 Main St",
 +        name: "Acme Plumbing",
 +        placeId: PLACE_ID,
-+        address: "1 Main St",
++        address: "1 Main St, Austin, TX 78701, USA",
 +        phone: "+1 512-555-0100",
 +        website: "acme.example",
 +        mapsUrl: "https://maps.google.com/?cid=123",
@@ -903,10 +913,13 @@ index 2f16bbf..3a5bef5 100644
 +      email: "test@test.com",
 +      name: "test",
 +      business: {
-+        value: "Acme Plumbing — 1 Main St",
++        // Google listings always get the server-built "Name - City, ST" summary
++        value: "Acme Plumbing - Austin, TX",
 +        name: "Acme Plumbing",
 +        placeId: PLACE_ID,
-+        address: "1 Main St",
++        address: "1 Main St, Austin, TX 78701, USA",
++        city: "Austin",
++        state: "TX",
 +        phone: "+1 512-555-0100",
 +        website: "https://acme.example",
 +        mapsUrl: "https://maps.google.com/?cid=123",
@@ -1048,11 +1061,18 @@ index 2f16bbf..3a5bef5 100644
 +    test(`should parse a JSON string into a structured value`, async ({}) => {
 +      const schema = getBookingResponsesPartialSchema({ bookingFields: getFields(), view: "ALL_VIEWS" });
 +      const parsedResponses = await schema.parseAsync({
-+        business: JSON.stringify({ name: "Acme", address: "1 Main St", placeId: PLACE_ID }),
++        business: JSON.stringify({ name: "Acme", address: "1 Main St, Austin, TX 78701, USA", placeId: PLACE_ID }),
 +      });
 +      expect(parsedResponses).toEqual(
 +        expect.objectContaining({
-+          business: { value: "Acme — 1 Main St", name: "Acme", address: "1 Main St", placeId: PLACE_ID },
++          business: {
++            value: "Acme - Austin, TX",
++            name: "Acme",
++            address: "1 Main St, Austin, TX 78701, USA",
++            city: "Austin",
++            state: "TX",
++            placeId: PLACE_ID,
++          },
 +        })
 +      );
 +    });
@@ -1233,14 +1253,15 @@ index 1d14645..6ed1f78 100644
  }
 diff --git a/packages/lib/bookings/businessPlace.test.ts b/packages/lib/bookings/businessPlace.test.ts
 new file mode 100644
-index 0000000..5c2484e
+index 0000000..69b298f
 --- /dev/null
 +++ b/packages/lib/bookings/businessPlace.test.ts
-@@ -0,0 +1,214 @@
+@@ -0,0 +1,276 @@
 +import { describe, expect, it } from "vitest";
 +
 +import {
 +  buildBusinessPlaceSummary,
++  deriveCityState,
 +  formatBusinessPlaceText,
 +  getBusinessPlaceLines,
 +  isBusinessPlaceValue,
@@ -1275,14 +1296,53 @@ index 0000000..5c2484e
 +  });
 +});
 +
-+describe("buildBusinessPlaceSummary", () => {
-+  it("joins name and address", () => {
-+    expect(buildBusinessPlaceSummary("Acme", "1 Main St")).toBe("Acme — 1 Main St");
++describe("deriveCityState", () => {
++  it("reads city and state from a full US address", () => {
++    expect(deriveCityState("21 S Evergreen Ave, Arlington Heights, IL 60005, USA")).toEqual({
++      city: "Arlington Heights",
++      state: "IL",
++    });
 +  });
 +
-+  it("returns just the name without an address", () => {
++  it("reads city and state from an autocomplete secondary text", () => {
++    expect(deriveCityState("South Evergreen Avenue, Arlington Heights, IL, USA")).toEqual({
++      city: "Arlington Heights",
++      state: "IL",
++    });
++    expect(deriveCityState("Arlington Heights, IL, USA")).toEqual({ city: "Arlington Heights", state: "IL" });
++  });
++
++  it("handles Canadian postal codes", () => {
++    expect(deriveCityState("123 Queen St W, Toronto, ON M5H 2M9, Canada")).toEqual({
++      city: "Toronto",
++      state: "ON",
++    });
++  });
++
++  it("returns nothing when it can't tell", () => {
++    expect(deriveCityState("1 Main St")).toEqual({});
++    expect(deriveCityState("IL, USA")).toEqual({});
++    expect(deriveCityState("1 Main St, 2nd Floor")).toEqual({});
++    expect(deriveCityState(undefined)).toEqual({});
++  });
++});
++
++describe("buildBusinessPlaceSummary", () => {
++  it("formats 'Name - City, ST'", () => {
++    expect(buildBusinessPlaceSummary("Leverage Local", { city: "Arlington Heights", state: "IL" })).toBe(
++      "Leverage Local - Arlington Heights, IL"
++    );
++  });
++
++  it("derives city and state from the address when they are missing", () => {
++    expect(
++      buildBusinessPlaceSummary("Leverage Local", { address: "21 S Evergreen Ave, Arlington Heights, IL 60005, USA" })
++    ).toBe("Leverage Local - Arlington Heights, IL");
++  });
++
++  it("returns just the name without a city or state", () => {
 +    expect(buildBusinessPlaceSummary(" Acme ")).toBe("Acme");
-+    expect(buildBusinessPlaceSummary("Acme", "  ")).toBe("Acme");
++    expect(buildBusinessPlaceSummary("Acme", { address: "1 Main St" })).toBe("Acme");
 +  });
 +});
 +
@@ -1293,18 +1353,33 @@ index 0000000..5c2484e
 +        value: " Acme — 1 Main St ",
 +        name: " Acme ",
 +        placeId: PLACE_ID,
-+        address: "1 Main St",
++        address: "1 Main St, Austin, TX 78701, USA",
 +        phone: "+1 555-123-4567",
 +        category: "  ",
 +        rating: "4.8",
 +        nested: { evil: true },
 +      })
 +    ).toEqual({
-+      value: "Acme — 1 Main St",
++      value: "Acme - Austin, TX",
 +      name: "Acme",
 +      placeId: PLACE_ID,
-+      address: "1 Main St",
++      address: "1 Main St, Austin, TX 78701, USA",
++      city: "Austin",
++      state: "TX",
 +      phone: "+1 555-123-4567",
++    });
++  });
++
++  it("rebuilds the summary for Google listings whatever the client sent", () => {
++    expect(
++      normalizeBusinessPlace({ value: "anything", name: "Acme", placeId: PLACE_ID, city: "Austin", state: "TX" })
++    ).toMatchObject({ value: "Acme - Austin, TX", city: "Austin", state: "TX" });
++  });
++
++  it("keeps the typed value for free text", () => {
++    expect(normalizeBusinessPlace({ value: "Corner Bakery", name: "Corner Bakery" })).toEqual({
++      value: "Corner Bakery",
++      name: "Corner Bakery",
 +    });
 +  });
 +
@@ -1322,8 +1397,15 @@ index 0000000..5c2484e
 +  });
 +
 +  it("builds the value summary from name and address", () => {
++    expect(normalizeBusinessPlace({ name: "Acme", address: "1 Main St, Austin, TX 78701, USA" })).toEqual({
++      value: "Acme - Austin, TX",
++      name: "Acme",
++      address: "1 Main St, Austin, TX 78701, USA",
++      city: "Austin",
++      state: "TX",
++    });
 +    expect(normalizeBusinessPlace({ name: "Acme", address: "1 Main St" })).toEqual({
-+      value: "Acme — 1 Main St",
++      value: "Acme",
 +      name: "Acme",
 +      address: "1 Main St",
 +    });
@@ -1453,16 +1535,16 @@ index 0000000..5c2484e
 +});
 diff --git a/packages/lib/bookings/businessPlace.ts b/packages/lib/bookings/businessPlace.ts
 new file mode 100644
-index 0000000..36c34a5
+index 0000000..5c1337e
 --- /dev/null
 +++ b/packages/lib/bookings/businessPlace.ts
-@@ -0,0 +1,182 @@
+@@ -0,0 +1,236 @@
 +/**
 + * Shared, framework-free helpers for the `businessPlace` booking question type.
 + *
 + * A `businessPlace` response is either `""` (nothing entered) or a flat object of strings.
-+ * `value` is always a human readable summary so code that unwraps `.value` keeps working.
-+ * Absence of `placeId` means the booker typed the business name themselves.
++ * `value` is always a human readable summary ("Business name - City, ST") so code that unwraps
++ * `.value` keeps working. Absence of `placeId` means the booker typed the business name themselves.
 + */
 +
 +export type BusinessPlaceValue = {
@@ -1470,6 +1552,8 @@ index 0000000..36c34a5
 +  name: string;
 +  placeId?: string;
 +  address?: string;
++  city?: string;
++  state?: string;
 +  phone?: string;
 +  website?: string;
 +  mapsUrl?: string;
@@ -1481,6 +1565,8 @@ index 0000000..36c34a5
 +  "name",
 +  "placeId",
 +  "address",
++  "city",
++  "state",
 +  "phone",
 +  "website",
 +  "mapsUrl",
@@ -1494,6 +1580,8 @@ index 0000000..36c34a5
 +  name: 200,
 +  placeId: 512,
 +  address: 300,
++  city: 100,
++  state: 50,
 +  phone: 40,
 +  website: 500,
 +  mapsUrl: 500,
@@ -1502,7 +1590,9 @@ index 0000000..36c34a5
 +
 +export const BUSINESS_PLACE_ID_REGEX = /^[A-Za-z0-9_-]{8,512}$/;
 +
-+const SUMMARY_SEPARATOR = " — ";
++const SUMMARY_SEPARATOR = " - ";
++
++const COUNTRY_NAME_REGEX = /^(usa|us|u\.s\.a\.|united states|united states of america|canada|ca)$/i;
 +
 +export const isBusinessPlaceValue = (v: unknown): v is BusinessPlaceValue => {
 +  if (typeof v !== "object" || v === null || Array.isArray(v)) return false;
@@ -1513,10 +1603,44 @@ index 0000000..36c34a5
 +  return BUSINESS_PLACE_KEYS.every((key) => obj[key] === undefined || typeof obj[key] === "string");
 +};
 +
-+export function buildBusinessPlaceSummary(name: string, address?: string): string {
++/**
++ * Best-effort "City" + "ST" from a US/CA style address such as
++ * "21 S Evergreen Ave, Arlington Heights, IL 60005, USA" or "Arlington Heights, IL, USA".
++ */
++export function deriveCityState(address?: string): { city?: string; state?: string } {
++  if (!address) return {};
++  const parts = address
++    .split(",")
++    .map((part) => part.trim())
++    .filter(Boolean);
++  if (parts.length && COUNTRY_NAME_REGEX.test(parts[parts.length - 1])) parts.pop();
++  if (parts.length < 2) return {};
++  // Last part is the state/province, optionally followed by a ZIP or postal code
++  const stateMatch = parts[parts.length - 1].match(/^([A-Za-z]{2})(?:\s+[A-Za-z0-9][A-Za-z0-9 -]*)?$/);
++  if (!stateMatch) return {};
++  const city = parts[parts.length - 2];
++  // A part with digits is a street line, not a city
++  if (/\d/.test(city)) return {};
++  return { city, state: stateMatch[1].toUpperCase() };
++}
++
++export function formatCityState(city?: string, state?: string): string {
++  return [city?.trim(), state?.trim()].filter(Boolean).join(", ");
++}
++
++/** "Business name - City, ST", or just the name when no city/state is known. */
++export function buildBusinessPlaceSummary(
++  name: string,
++  location?: { city?: string; state?: string; address?: string }
++): string {
 +  const trimmedName = name.trim();
-+  const trimmedAddress = address?.trim();
-+  return trimmedAddress ? `${trimmedName}${SUMMARY_SEPARATOR}${trimmedAddress}` : trimmedName;
++  let city = location?.city;
++  let state = location?.state;
++  if (!city && !state && location?.address) {
++    ({ city, state } = deriveCityState(location.address));
++  }
++  const cityState = formatCityState(city, state);
++  return cityState ? `${trimmedName}${SUMMARY_SEPARATOR}${cityState}` : trimmedName;
 +}
 +
 +function parseHttpUrl(raw: string): URL | null {
@@ -1585,12 +1709,24 @@ index 0000000..36c34a5
 +  const name = (out.name || out.value || "").slice(0, MAX_LENGTHS.name).trim();
 +  if (!name) return "";
 +
++  // Fill city/state from the address when Google didn't hand them over explicitly
++  if (!out.city && !out.state && out.address) {
++    const derived = deriveCityState(out.address);
++    if (derived.city) out.city = derived.city.slice(0, MAX_LENGTHS.city);
++    if (derived.state) out.state = derived.state.slice(0, MAX_LENGTHS.state);
++  }
++
++  // Google listings always get a server-built summary so the format is consistent whatever the
++  // client sent; free-text answers keep what the booker typed.
++  const summary = buildBusinessPlaceSummary(name, { city: out.city, state: out.state });
 +  const result: BusinessPlaceValue = {
-+    value: (out.value || buildBusinessPlaceSummary(name, out.address)).slice(0, MAX_LENGTHS.value),
++    value: (out.placeId ? summary : out.value || summary).slice(0, MAX_LENGTHS.value),
 +    name,
 +  };
 +  if (out.placeId) result.placeId = out.placeId;
 +  if (out.address) result.address = out.address;
++  if (out.city) result.city = out.city;
++  if (out.state) result.state = out.state;
 +  if (out.phone) result.phone = out.phone;
 +  if (out.website) result.website = out.website;
 +  if (out.mapsUrl) result.mapsUrl = out.mapsUrl;
@@ -1666,11 +1802,11 @@ index b072a0e..b68548f 100644
      labelValueMap = customInputs as Record<string, string | string[]>;
 diff --git a/packages/lib/server/places/googlePlacesClient.ts b/packages/lib/server/places/googlePlacesClient.ts
 new file mode 100644
-index 0000000..9a67b3c
+index 0000000..1e2b047
 --- /dev/null
 +++ b/packages/lib/server/places/googlePlacesClient.ts
-@@ -0,0 +1,196 @@
-+import { BUSINESS_PLACE_ID_REGEX } from "@calcom/lib/bookings/businessPlace";
+@@ -0,0 +1,237 @@
++import { BUSINESS_PLACE_ID_REGEX, deriveCityState } from "@calcom/lib/bookings/businessPlace";
 +import { HttpError } from "@calcom/lib/http-error";
 +import logger from "@calcom/lib/logger";
 +
@@ -1684,6 +1820,7 @@ index 0000000..9a67b3c
 +  "id",
 +  "displayName",
 +  "formattedAddress",
++  "addressComponents",
 +  "nationalPhoneNumber",
 +  "internationalPhoneNumber",
 +  "websiteUri",
@@ -1697,6 +1834,8 @@ index 0000000..9a67b3c
 +  placeId: string;
 +  name: string;
 +  address?: string;
++  city?: string;
++  state?: string;
 +  phone?: string;
 +  website?: string;
 +  mapsUrl?: string;
@@ -1812,9 +1951,41 @@ index 0000000..9a67b3c
 +  return mapAutocompleteResponse(data);
 +}
 +
++type RawAddressComponent = { longText?: unknown; shortText?: unknown; types?: unknown };
++
++// In order of preference; not every country/place has a "locality"
++const CITY_COMPONENT_TYPES = [
++  "locality",
++  "postal_town",
++  "sublocality_level_1",
++  "sublocality",
++  "administrative_area_level_3",
++  "neighborhood",
++];
++
++function cityStateFromComponents(components: unknown): { city?: string; state?: string } {
++  if (!Array.isArray(components)) return {};
++  const find = (type: string) =>
++    (components as RawAddressComponent[]).find(
++      (component) => Array.isArray(component?.types) && component.types.includes(type)
++    );
++  let city: string | undefined;
++  for (const type of CITY_COMPONENT_TYPES) {
++    const text = asString(find(type)?.longText);
++    if (text) {
++      city = text;
++      break;
++    }
++  }
++  const stateComponent = find("administrative_area_level_1");
++  const state = asString(stateComponent?.shortText) || asString(stateComponent?.longText) || undefined;
++  return { city, state };
++}
++
 +type RawPlace = {
 +  displayName?: { text?: unknown };
 +  formattedAddress?: unknown;
++  addressComponents?: unknown;
 +  nationalPhoneNumber?: unknown;
 +  internationalPhoneNumber?: unknown;
 +  websiteUri?: unknown;
@@ -1830,6 +2001,12 @@ index 0000000..9a67b3c
 +  const details: PlaceDetails = { placeId, name };
 +  const address = asString(place.formattedAddress);
 +  if (address) details.address = address;
++  const fromComponents = cityStateFromComponents(place.addressComponents);
++  const fromAddress = deriveCityState(address);
++  const city = fromComponents.city || fromAddress.city;
++  const state = fromComponents.state || fromAddress.state;
++  if (city) details.city = city;
++  if (state) details.state = state;
 +  // International format keeps the country code, so `tel:` links and the CRM get a dialable number.
 +  const phone = asString(place.internationalPhoneNumber) || asString(place.nationalPhoneNumber);
 +  if (phone) details.phone = phone;
@@ -1868,10 +2045,10 @@ index 0000000..9a67b3c
 +}
 diff --git a/packages/lib/server/places/handlers.test.ts b/packages/lib/server/places/handlers.test.ts
 new file mode 100644
-index 0000000..f46a28a
+index 0000000..30ffd47
 --- /dev/null
 +++ b/packages/lib/server/places/handlers.test.ts
-@@ -0,0 +1,251 @@
+@@ -0,0 +1,272 @@
 +// @vitest-environment node
 +import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 +
@@ -2085,6 +2262,9 @@ index 0000000..f46a28a
 +        placeId: PLACE_ID,
 +        name: "Acme Plumbing",
 +        address: "1 Main St, Austin, TX 78701, USA",
++        // Parsed from the formatted address because this fixture has no addressComponents
++        city: "Austin",
++        state: "TX",
 +        phone: "+1 512-555-0100",
 +        website: "https://acmeplumbing.example/",
 +        mapsUrl: "https://maps.google.com/?cid=123",
@@ -2095,9 +2275,27 @@ index 0000000..f46a28a
 +    const [url, init] = fetchMock.mock.calls[0];
 +    expect(url).toBe(`https://places.googleapis.com/v1/places/${PLACE_ID}?sessionToken=${SESSION_TOKEN}`);
 +    expect(init.headers["X-Goog-FieldMask"]).toBe(
-+      "id,displayName,formattedAddress,nationalPhoneNumber,internationalPhoneNumber,websiteUri,googleMapsUri,primaryTypeDisplayName"
++      "id,displayName,formattedAddress,addressComponents,nationalPhoneNumber,internationalPhoneNumber,websiteUri,googleMapsUri,primaryTypeDisplayName"
 +    );
 +    expect(init.headers["X-Goog-Api-Key"]).toBe("test-places-key");
++  });
++
++  it("prefers Google's address components for city and state", async () => {
++    fetchMock.mockResolvedValueOnce(
++      jsonResponse({
++        ...detailsResponse,
++        formattedAddress: "21 S Evergreen Ave, Arlington Heights, IL 60005, USA",
++        addressComponents: [
++          { longText: "21", shortText: "21", types: ["street_number"] },
++          { longText: "Arlington Heights", shortText: "Arlington Heights", types: ["locality", "political"] },
++          { longText: "Cook County", shortText: "Cook County", types: ["administrative_area_level_2"] },
++          { longText: "Illinois", shortText: "IL", types: ["administrative_area_level_1", "political"] },
++          { longText: "United States", shortText: "US", types: ["country", "political"] },
++        ],
++      })
++    );
++    const result = await handleDetailsRequest({ placeId: PLACE_ID, searchParams: params({}), clientKey: "d7" });
++    expect(result.body).toMatchObject({ place: { city: "Arlington Heights", state: "IL" } });
 +  });
 +
 +  it("caches details by place id", async () => {
