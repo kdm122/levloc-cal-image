@@ -29,6 +29,11 @@ on:
         description: "Unlock EE (Teams/Orgs) for DEV/TESTING by making the license check pass. '1' to enable, blank to disable. Requires a real CALCOM_LICENSE_KEY before production."
         required: false
         default: ""
+      run_tests:
+        description: "Run the unit tests covering patches/*.patch before building (adds ~5-10 min)"
+        type: boolean
+        required: false
+        default: false
   schedule:
     # Monthly canary: build-only, verifies upstream main still compiles.
     - cron: "0 6 1 * *"
@@ -80,6 +85,49 @@ jobs:
         run: |
           git clone --filter=blob:none https://github.com/calcom/cal.diy.git src
           git -C src checkout "${{ steps.sha.outputs.full }}"
+
+      # Feature patches (real code changes, e.g. the "Business (Google)" booking question). Applied
+      # before the sed-based tweaks below so their anchors stay untouched; the files don't overlap.
+      - name: Apply levloc feature patches
+        working-directory: src
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          for p in "$GITHUB_WORKSPACE"/patches/*.patch; do
+            echo "Applying $(basename "$p")"
+            git apply --check "$p" || { echo "::error::$(basename "$p") does not apply cleanly to $(git rev-parse --short HEAD) - rebase the patch" >&2; exit 1; }
+            git apply "$p"
+          done
+          git status --short | head -50
+
+      - name: Set up Node for unit tests
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_tests }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # next.config.ts is patched to ignoreBuildErrors, so type errors in patched code would not fail the
+      # image build. These targeted suites are the safety net for patches/*.patch.
+      - name: Run unit tests for patched code (opt-in)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_tests }}
+        env:
+          NODE_OPTIONS: --max-old-space-size=6144
+          DATABASE_URL: postgresql://unicorn_user:magical_password@localhost:5432/calendso
+        run: |
+          set -euo pipefail
+          # Test in a throwaway copy so node_modules and .yarn state never reach the Docker build context.
+          cp -a src "$RUNNER_TEMP/src-test"
+          cd "$RUNNER_TEMP/src-test"
+          yarn install --immutable
+          yarn prisma generate
+          TZ=UTC yarn vitest run \
+            packages/lib/bookings/businessPlace.test.ts \
+            packages/lib/server/places \
+            packages/features/bookings/lib/getBookingResponsesSchema.test.ts \
+            apps/web/modules/form-builder/components/BusinessPlaceInput.test.tsx \
+            apps/web/modules/event-types/components/tabs/advanced/FormBuilder.test.tsx
+          cd "$GITHUB_WORKSPACE"
+          rm -rf "$RUNNER_TEMP/src-test"
 
       - name: Inject branding NEXT_PUBLIC_* build args into Dockerfile
         working-directory: src

@@ -1,0 +1,2 @@
+# git patches must stay byte-exact (LF) or `git apply` fails on the Linux runner
+patches/*.patch -text

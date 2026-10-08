@@ -6,8 +6,9 @@ it to **GHCR**, because upstream publishes no official `cal.diy` image.
 
 The image runs on Railway in the `levloc-cal` project as `https://cal.levloc.com`.
 
-- **Image:** `ghcr.io/kdm122/cal.diy:<short-sha>`
-- **Current pinned SHA:** `6bc45298226f96ff79e0c070c8b2ce39727e8477` (upstream `main`, 2026-09-14)
+- **Image:** `ghcr.io/kdm122/cal.diy:<tag>`
+- **Current build:** upstream tag `v6.2.0` (last release that still contains Teams/`ee`),
+  dispatched with `ee=1` and an `image_tag` such as `v6.2.0-places1`.
 - **Nothing secret is in this repo or the image.** Real secrets live only in Railway.
 
 ## One-time setup
@@ -55,5 +56,35 @@ consent, and the baked `NEXT_PUBLIC_WEBAPP_URL=https://cal.levloc.com`) as build
 args. The patch step **fails loudly** if the upstream Dockerfile layout drifts,
 so a bad SHA bump can't silently drop the branding.
 
-A monthly scheduled run does a **build-only** canary (no push) to catch upstream
-breakage early.
+Small tweaks (favicon, OAuth-only login, Google Meet default location, workflow
+credit gate, EE dev/testing unlock) are `sed`/`awk` steps in `build.yml`, each
+guarded by an anchor check.
+
+### Feature patches (`patches/*.patch`)
+
+Real code changes are carried as git patches and applied with `git apply` right
+after the upstream clone, before the `sed` steps:
+
+| Patch | What it does |
+|---|---|
+| `0001-business-place-booking-field.patch` | New **Business (Google)** booking question type (`businessPlace`): Google Places autocomplete in the booker via the server-side proxy `/api/places/*`, structured answer `{ value, name, placeId, address, phone, website, mapsUrl, category }` shown on the booking page, bookings sheet, emails, calendar descriptions and webhooks. Needs `GOOGLE_PLACES_API_KEY` on the Railway `web` service (runtime only, no rebuild); without it the question degrades to plain text. |
+
+**Important:** `next.config.ts` is patched to `ignoreBuildErrors: true`, so
+TypeScript errors in patched code do **not** fail the image build; only syntax and
+module-resolution errors do. Review patches carefully and run the workflow with
+**`run_tests`** checked (runs the unit tests covering the patches in a throwaway
+copy before the Docker build, ~5-10 extra minutes).
+
+**Regenerating a patch when bumping the upstream ref:**
+
+1. `git clone https://github.com/calcom/cal.diy.git && cd cal.diy && git switch -c levloc/<feature> <new-ref>`
+2. `git apply --3way ../levloc-cal-image/patches/0001-business-place-booking-field.patch` and resolve conflicts.
+3. `git add -A && git diff --cached --binary <new-ref> > ../levloc-cal-image/patches/0001-business-place-booking-field.patch`
+4. Run the workflow with `run_tests` checked.
+
+The build fails with "does not apply cleanly" if a patch has drifted, so a bad
+bump can't silently ship without the feature.
+
+A monthly scheduled run does a **build-only** canary (no push) against upstream
+`main`. Because the patches and `sed` anchors target `v6.2.0`, expect it to fail
+at the patch steps; it only signals that upstream has moved on.

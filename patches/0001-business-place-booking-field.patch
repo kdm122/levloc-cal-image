@@ -1,0 +1,2481 @@
+diff --git a/.env.example b/.env.example
+index cef10a0..b28d7ff 100644
+--- a/.env.example
++++ b/.env.example
+@@ -128,6 +128,13 @@ NEXT_PUBLIC_FRESHCHAT_HOST=
+ # 4. Create the API Key (APIs & Services → Credentials)
+ GOOGLE_CALENDAR_API_KEY=
+ 
++# Google Places API (New) key for the "Business (Google)" booking question.
++# Server-only: requests are proxied through /api/places/*, so the key never reaches the browser.
++# Restrict the key to "Places API (New)". Leave empty to make that question a plain text input.
++GOOGLE_PLACES_API_KEY=
++# Optional comma separated region codes to restrict business search to (default: us,ca)
++GOOGLE_PLACES_REGION_CODES=
++
+ # Google OAuth credentials
+ # To enable Login with Google you need to:
+ # 1. Set `GOOGLE_API_CREDENTIALS` below
+diff --git a/apps/web/app/api/places/autocomplete/route.ts b/apps/web/app/api/places/autocomplete/route.ts
+new file mode 100644
+index 0000000..031a76e
+--- /dev/null
++++ b/apps/web/app/api/places/autocomplete/route.ts
+@@ -0,0 +1,20 @@
++import { defaultResponderForAppDir } from "app/api/defaultResponderForAppDir";
++import type { NextRequest } from "next/server";
++import { NextResponse } from "next/server";
++
++import getIP from "@calcom/lib/getIP";
++import { piiHasher } from "@calcom/lib/server/PiiHasher";
++import { handleAutocompleteRequest } from "@calcom/lib/server/places/handlers";
++
++// Server-side proxy so GOOGLE_PLACES_API_KEY never reaches the browser.
++export const dynamic = "force-dynamic";
++
++async function handler(req: NextRequest) {
++  const result = await handleAutocompleteRequest({
++    searchParams: req.nextUrl.searchParams,
++    clientKey: piiHasher.hash(getIP(req)),
++  });
++  return NextResponse.json(result.body, { status: result.status, headers: result.headers });
++}
++
++export const GET = defaultResponderForAppDir(handler);
+diff --git a/apps/web/app/api/places/details/[placeId]/route.ts b/apps/web/app/api/places/details/[placeId]/route.ts
+new file mode 100644
+index 0000000..d7c4651
+--- /dev/null
++++ b/apps/web/app/api/places/details/[placeId]/route.ts
+@@ -0,0 +1,23 @@
++import type { Params } from "app/_types";
++import { defaultResponderForAppDir } from "app/api/defaultResponderForAppDir";
++import type { NextRequest } from "next/server";
++import { NextResponse } from "next/server";
++
++import getIP from "@calcom/lib/getIP";
++import { piiHasher } from "@calcom/lib/server/PiiHasher";
++import { handleDetailsRequest } from "@calcom/lib/server/places/handlers";
++
++// Server-side proxy so GOOGLE_PLACES_API_KEY never reaches the browser.
++export const dynamic = "force-dynamic";
++
++async function handler(req: NextRequest, { params }: { params: Promise<Params> }) {
++  const { placeId } = await params;
++  const result = await handleDetailsRequest({
++    placeId,
++    searchParams: req.nextUrl.searchParams,
++    clientKey: piiHasher.hash(getIP(req)),
++  });
++  return NextResponse.json(result.body, { status: result.status, headers: result.headers });
++}
++
++export const GET = defaultResponderForAppDir(handler);
+diff --git a/apps/web/modules/bookings/components/BookingDetailsSheet.tsx b/apps/web/modules/bookings/components/BookingDetailsSheet.tsx
+index 7c17bef..ac1bde8 100644
+--- a/apps/web/modules/bookings/components/BookingDetailsSheet.tsx
++++ b/apps/web/modules/bookings/components/BookingDetailsSheet.tsx
+@@ -3,6 +3,7 @@
+ import dayjs from "@calcom/dayjs";
+ import { useBookingLocation } from "@calcom/features/bookings/hooks";
+ import { shouldShowFieldInCustomResponses } from "@calcom/lib/bookings/SystemField";
++import { isBusinessPlaceValue } from "@calcom/lib/bookings/businessPlace";
+ import { formatPrice } from "@calcom/lib/currencyConversions";
+ import { formatToLocalizedTimezone } from "@calcom/lib/dayjs";
+ import { getPlaceholderAvatar } from "@calcom/lib/defaultAvatarImage";
+@@ -44,6 +45,7 @@ import { RejectBookingButton } from "../../../components/booking/RejectBookingBu
+ import type { BookingListingStatus } from "../../../components/booking/types";
+ import { usePaymentStatus } from "../hooks/usePaymentStatus";
+ import { useBookingDetailsSheetStore } from "../store/bookingDetailsSheetStore";
++import { BusinessPlaceAnswer } from "./BusinessPlaceAnswer";
+ import type { BookingOutput } from "../types";
+ import {
+   checkSheetActive,
+@@ -846,9 +848,13 @@ function CustomQuestionsSection({
+ 
+         return (
+           <Section key={field.name} title={label}>
+-            <p className="font-medium text-emphasis text-sm">
+-              {field.type === "boolean" ? (answer ? t("yes") : t("no")) : String(answer)}
+-            </p>
++            {isBusinessPlaceValue(answer) ? (
++              <BusinessPlaceAnswer value={answer} className="text-emphasis text-sm" />
++            ) : (
++              <p className="font-medium text-emphasis text-sm">
++                {field.type === "boolean" ? (answer ? t("yes") : t("no")) : String(answer)}
++              </p>
++            )}
+           </Section>
+         );
+       })}
+diff --git a/apps/web/modules/bookings/components/BusinessPlaceAnswer.tsx b/apps/web/modules/bookings/components/BusinessPlaceAnswer.tsx
+new file mode 100644
+index 0000000..e5ff6a3
+--- /dev/null
++++ b/apps/web/modules/bookings/components/BusinessPlaceAnswer.tsx
+@@ -0,0 +1,44 @@
++import { type BusinessPlaceValue, getBusinessPlaceLines } from "@calcom/lib/bookings/businessPlace";
++import classNames from "@calcom/ui/classNames";
++
++/**
++ * Renders a `businessPlace` booking response. Hrefs come from `getBusinessPlaceLines`, which only
++ * yields http(s) websites, Google Maps links and `tel:` numbers.
++ */
++export function BusinessPlaceAnswer({ value, className }: { value: BusinessPlaceValue; className?: string }) {
++  const lines = getBusinessPlaceLines(value);
++  if (!lines.length) return null;
++
++  return (
++    <div className={classNames("flex flex-col gap-0.5", className)} data-testid="business-place-answer">
++      {lines.map((line) => {
++        if (line.kind === "name") {
++          return (
++            <span key={line.kind} className="font-medium">
++              {line.text}
++            </span>
++          );
++        }
++        if (line.href) {
++          const isExternal = line.kind === "website" || line.kind === "maps";
++          return (
++            <a
++              key={line.kind}
++              href={line.href}
++              className="w-fit underline"
++              {...(isExternal ? { target: "_blank", rel: "noopener noreferrer" } : {})}>
++              {line.text}
++            </a>
++          );
++        }
++        return (
++          <span key={line.kind} className={line.kind === "category" ? "text-subtle" : undefined}>
++            {line.text}
++          </span>
++        );
++      })}
++    </div>
++  );
++}
++
++export default BusinessPlaceAnswer;
+diff --git a/apps/web/modules/bookings/views/bookings-single-view.tsx b/apps/web/modules/bookings/views/bookings-single-view.tsx
+index 985dff6..a022adf 100644
+--- a/apps/web/modules/bookings/views/bookings-single-view.tsx
++++ b/apps/web/modules/bookings/views/bookings-single-view.tsx
+@@ -28,6 +28,7 @@ import { isWithinMinimumRescheduleNotice as isWithinMinimumRescheduleNoticeUtil
+ import type { nameObjectSchema } from "@calcom/features/eventtypes/lib/eventNaming";
+ import { getEventName } from "@calcom/features/eventtypes/lib/eventNaming";
+ import { shouldShowFieldInCustomResponses } from "@calcom/lib/bookings/SystemField";
++import { isBusinessPlaceValue } from "@calcom/lib/bookings/businessPlace";
+ import { APP_NAME } from "@calcom/lib/constants";
+ import { formatToLocalizedDate, formatToLocalizedTime, formatToLocalizedTimezone } from "@calcom/lib/dayjs";
+ import useGetBrandingColours from "@calcom/lib/getBrandColours";
+@@ -45,6 +46,7 @@ import { localStorage } from "@calcom/lib/webstorage";
+ import { AssignmentReasonEnum, BookingStatus, SchedulingType } from "@calcom/prisma/enums";
+ 
+ import assignmentReasonBadgeTitleMap from "@calcom/web/lib/booking/assignmentReasonBadgeTitleMap";
++import { BusinessPlaceAnswer } from "@calcom/web/modules/bookings/components/BusinessPlaceAnswer";
+ import { bookingMetadataSchema } from "@calcom/prisma/zod-utils";
+ import { trpc } from "@calcom/trpc/react";
+ import { Alert } from "@calcom/ui/components/alert";
+@@ -833,16 +835,25 @@ export default function Success(props: PageProps) {
+                                   __html: markdownToSafeHTML(label),
+                                 }}
+                               />
+-                              <p
+-                                className="text-default wrap-break-word"
+-                                data-testid="field-response"
+-                                data-fob-field={field.name}>
+-                                {field.type === "boolean"
+-                                  ? response
+-                                    ? t("yes")
+-                                    : t("no")
+-                                  : response.toString()}
+-                              </p>
++                              {isBusinessPlaceValue(response) ? (
++                                <div
++                                  className="text-default wrap-break-word"
++                                  data-testid="field-response"
++                                  data-fob-field={field.name}>
++                                  <BusinessPlaceAnswer value={response} />
++                                </div>
++                              ) : (
++                                <p
++                                  className="text-default wrap-break-word"
++                                  data-testid="field-response"
++                                  data-fob-field={field.name}>
++                                  {field.type === "boolean"
++                                    ? response
++                                      ? t("yes")
++                                      : t("no")
++                                    : response.toString()}
++                                </p>
++                              )}
+                             </Fragment>
+                           );
+                         })}
+diff --git a/apps/web/modules/event-types/components/tabs/advanced/FormBuilder.test.tsx b/apps/web/modules/event-types/components/tabs/advanced/FormBuilder.test.tsx
+index 5c65073..529c1ac 100644
+--- a/apps/web/modules/event-types/components/tabs/advanced/FormBuilder.test.tsx
++++ b/apps/web/modules/event-types/components/tabs/advanced/FormBuilder.test.tsx
+@@ -82,6 +82,7 @@ describe("FormBuilder", () => {
+       { fieldType: "checkbox", label: "CheckBox Group Field" },
+       { fieldType: "radio", label: "Radio Group Field" },
+       { fieldType: "boolean", label: "Checkbox Field" },
++      { fieldType: "businessPlace", label: "Business Field" },
+     ];
+     beforeEach(() => {
+       renderComponent({ formBuilderProps: mockProps, formDefaultValues: {} });
+diff --git a/apps/web/modules/form-builder/components/BusinessPlaceInput.test.tsx b/apps/web/modules/form-builder/components/BusinessPlaceInput.test.tsx
+new file mode 100644
+index 0000000..4b431a1
+--- /dev/null
++++ b/apps/web/modules/form-builder/components/BusinessPlaceInput.test.tsx
+@@ -0,0 +1,197 @@
++import { fireEvent, render, screen, waitFor } from "@testing-library/react";
++import { useState } from "react";
++import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
++
++import type { BusinessPlaceValue } from "@calcom/lib/bookings/businessPlace";
++
++import { BusinessPlaceInput } from "./BusinessPlaceInput";
++
++vi.mock("@calcom/lib/hooks/useLocale", () => ({
++  useLocale: () => ({
++    t: (key: string, opts?: { text?: string }) => (opts?.text ? `${key}:${opts.text}` : key),
++    i18n: { language: "en" },
++  }),
++}));
++
++const PLACE_ID = "ChIJN1t_tDeuEmsRUsoyG83frY4";
++const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
++
++const jsonResponse = (body: unknown, status = 200) =>
++  new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
++
++const autocompleteBody = {
++  enabled: true,
++  suggestions: [{ placeId: PLACE_ID, mainText: "Acme Plumbing", secondaryText: "1 Main St, Austin, TX" }],
++};
++
++const detailsBody = {
++  enabled: true,
++  place: {
++    placeId: PLACE_ID,
++    name: "Acme Plumbing",
++    address: "1 Main St, Austin, TX 78701, USA",
++    phone: "+1 512-555-0100",
++    website: "https://acme.example/",
++    mapsUrl: "https://maps.google.com/?cid=1",
++    category: "Plumber",
++  },
++};
++
++let fetchMock: ReturnType<typeof vi.fn>;
++
++function Harness({
++  initialValue,
++  onSetValue,
++  readOnly,
++}: {
++  initialValue?: BusinessPlaceValue | string;
++  onSetValue: (value: BusinessPlaceValue | "") => void;
++  readOnly?: boolean;
++}) {
++  const [value, setValue] = useState<BusinessPlaceValue | string | undefined>(initialValue);
++  return (
++    <BusinessPlaceInput
++      id="business"
++      name="business"
++      placeholder="Search business"
++      value={value}
++      readOnly={readOnly}
++      setValue={(next) => {
++        onSetValue(next);
++        setValue(next);
++      }}
++    />
++  );
++}
++
++const getSearchInput = (container: HTMLElement) => container.querySelector("#business") as HTMLInputElement;
++
++const typeInto = (input: HTMLInputElement, text: string) => {
++  fireEvent.focus(input);
++  fireEvent.change(input, { target: { value: text } });
++};
++
++const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
++
++beforeEach(() => {
++  fetchMock = vi.fn();
++  vi.stubGlobal("fetch", fetchMock);
++});
++
++afterEach(() => {
++  vi.unstubAllGlobals();
++});
++
++describe("BusinessPlaceInput", () => {
++  it("does not search with fewer than 3 characters", async () => {
++    const onSetValue = vi.fn();
++    const { container } = render(<Harness onSetValue={onSetValue} />);
++    typeInto(getSearchInput(container), "ac");
++    await sleep(450);
++    expect(fetchMock).not.toHaveBeenCalled();
++  });
++
++  it("searches after the debounce with a uuid session token", async () => {
++    fetchMock.mockResolvedValue(jsonResponse(autocompleteBody));
++    const { container } = render(<Harness onSetValue={vi.fn()} />);
++    typeInto(getSearchInput(container), "acme");
++
++    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
++    const url = new URL(fetchMock.mock.calls[0][0] as string, "http://localhost");
++    expect(url.pathname).toBe("/api/places/autocomplete");
++    expect(url.searchParams.get("input")).toBe("acme");
++    expect(url.searchParams.get("sessionToken")).toMatch(UUID_REGEX);
++  });
++
++  it("stores the structured business when a suggestion is chosen", async () => {
++    fetchMock.mockImplementation(async (input: string) =>
++      input.includes("/api/places/details/") ? jsonResponse(detailsBody) : jsonResponse(autocompleteBody)
++    );
++    const onSetValue = vi.fn();
++    const { container } = render(<Harness onSetValue={onSetValue} />);
++    typeInto(getSearchInput(container), "acme");
++
++    const option = await screen.findByText("Acme Plumbing");
++    fireEvent.click(option);
++
++    // Optimistic value from the prediction...
++    expect(onSetValue).toHaveBeenCalledWith({
++      value: "Acme Plumbing — 1 Main St, Austin, TX",
++      name: "Acme Plumbing",
++      address: "1 Main St, Austin, TX",
++      placeId: PLACE_ID,
++    });
++
++    // ...then enriched with Place Details, reusing the autocomplete session token.
++    await waitFor(() =>
++      expect(onSetValue).toHaveBeenLastCalledWith({
++        value: "Acme Plumbing — 1 Main St, Austin, TX 78701, USA",
++        name: "Acme Plumbing",
++        placeId: PLACE_ID,
++        address: "1 Main St, Austin, TX 78701, USA",
++        phone: "+1 512-555-0100",
++        website: "https://acme.example/",
++        mapsUrl: "https://maps.google.com/?cid=1",
++        category: "Plumber",
++      })
++    );
++    const autocompleteUrl = new URL(fetchMock.mock.calls[0][0] as string, "http://localhost");
++    const detailsUrl = new URL(fetchMock.mock.calls[1][0] as string, "http://localhost");
++    expect(detailsUrl.pathname).toBe(`/api/places/details/${PLACE_ID}`);
++    expect(detailsUrl.searchParams.get("sessionToken")).toBe(autocompleteUrl.searchParams.get("sessionToken"));
++  });
++
++  it("stores free text when 'use as entered' is chosen", async () => {
++    fetchMock.mockResolvedValue(jsonResponse({ enabled: true, suggestions: [] }));
++    const onSetValue = vi.fn();
++    const { container } = render(<Harness onSetValue={onSetValue} />);
++    typeInto(getSearchInput(container), "Corner Bakery");
++
++    fireEvent.click(await screen.findByText("use_as_entered:Corner Bakery"));
++    expect(onSetValue).toHaveBeenCalledWith({ value: "Corner Bakery", name: "Corner Bakery" });
++  });
++
++  it("switches to a plain text input when the API is disabled", async () => {
++    fetchMock.mockResolvedValue(jsonResponse({ enabled: false }, 503));
++    const onSetValue = vi.fn();
++    const { container } = render(<Harness onSetValue={onSetValue} />);
++    typeInto(getSearchInput(container), "acme");
++
++    const fallbackInput = (await screen.findByPlaceholderText("Search business")) as HTMLInputElement;
++    // What was already typed is kept and committed as free text
++    expect(fallbackInput.value).toBe("acme");
++    expect(onSetValue).toHaveBeenCalledWith({ value: "acme", name: "acme" });
++
++    fireEvent.change(fallbackInput, { target: { value: "Acme Co " } });
++    expect(onSetValue).toHaveBeenLastCalledWith({ value: "Acme Co", name: "Acme Co" });
++
++    fireEvent.change(fallbackInput, { target: { value: "" } });
++    expect(onSetValue).toHaveBeenLastCalledWith("");
++  });
++
++  it("shows an existing value and clears it", async () => {
++    const onSetValue = vi.fn();
++    const { container } = render(
++      <Harness
++        initialValue={{ value: "Acme Plumbing — 1 Main St", name: "Acme Plumbing", placeId: PLACE_ID }}
++        onSetValue={onSetValue}
++      />
++    );
++    expect(screen.getByText("Acme Plumbing — 1 Main St")).toBeInTheDocument();
++
++    const input = getSearchInput(container);
++    fireEvent.focus(input);
++    fireEvent.keyDown(input, { key: "Backspace", code: "Backspace", keyCode: 8 });
++    expect(onSetValue).toHaveBeenLastCalledWith("");
++  });
++
++  it("hydrates a legacy plain string value", () => {
++    render(<Harness initialValue="Corner Bakery" onSetValue={vi.fn()} />);
++    expect(screen.getByText("Corner Bakery")).toBeInTheDocument();
++  });
++
++  it("is disabled when read only", () => {
++    const { container } = render(<Harness onSetValue={vi.fn()} readOnly />);
++    expect(getSearchInput(container)).toBeDisabled();
++  });
++});
+diff --git a/apps/web/modules/form-builder/components/BusinessPlaceInput.tsx b/apps/web/modules/form-builder/components/BusinessPlaceInput.tsx
+new file mode 100644
+index 0000000..c3ed133
+--- /dev/null
++++ b/apps/web/modules/form-builder/components/BusinessPlaceInput.tsx
+@@ -0,0 +1,331 @@
++import { useEffect, useMemo, useRef, useState } from "react";
++import type { FormatOptionLabelMeta, InputActionMeta, SingleValue } from "react-select";
++
++import {
++  type BusinessPlaceValue,
++  buildBusinessPlaceSummary,
++  isBusinessPlaceValue,
++  normalizeBusinessPlace,
++} from "@calcom/lib/bookings/businessPlace";
++import { useDebounce } from "@calcom/lib/hooks/useDebounce";
++import { useLocale } from "@calcom/lib/hooks/useLocale";
++import { Input, Select } from "@calcom/ui/components/form";
++import { Icon } from "@calcom/ui/components/icon";
++
++export type BusinessPlaceInputProps = {
++  id?: string;
++  name?: string;
++  value: BusinessPlaceValue | string | undefined;
++  setValue: (value: BusinessPlaceValue | "") => void;
++  placeholder?: string;
++  readOnly?: boolean;
++  disabled?: boolean;
++};
++
++type Suggestion = { placeId: string; mainText: string; secondaryText: string };
++
++type Option =
++  | { kind: "prediction"; value: string; label: string; suggestion: Suggestion }
++  | { kind: "freeText"; value: string; label: string; text: string }
++  | { kind: "selected"; value: string; label: string };
++
++const MIN_QUERY_LENGTH = 3;
++const DEBOUNCE_MS = 300;
++
++export function newPlacesSessionToken(): string {
++  const cryptoObj = (globalThis as { crypto?: Crypto }).crypto;
++  if (cryptoObj && typeof cryptoObj.randomUUID === "function") {
++    return cryptoObj.randomUUID();
++  }
++  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (char) => {
++    const random = (Math.random() * 16) | 0;
++    const nibble = char === "x" ? random : (random & 0x3) | 0x8;
++    return nibble.toString(16);
++  });
++}
++
++function toSelected(value: BusinessPlaceInputProps["value"]): BusinessPlaceValue | null {
++  if (isBusinessPlaceValue(value)) return value;
++  if (typeof value === "string" && value.trim()) return { value: value.trim(), name: value.trim() };
++  return null;
++}
++
++function freeTextValue(text: string): BusinessPlaceValue | "" {
++  return normalizeBusinessPlace({ value: text, name: text });
++}
++
++/**
++ * Booker input for the `businessPlace` booking question. Searches Google Places (via our own
++ * `/api/places/*` proxy) and stores the chosen listing as a structured object. Falls back to a plain
++ * text input when the proxy is disabled or unreachable.
++ */
++export function BusinessPlaceInput({
++  id,
++  name,
++  value,
++  setValue,
++  placeholder,
++  readOnly,
++  disabled,
++}: BusinessPlaceInputProps) {
++  const { t, i18n } = useLocale();
++  const selected = toSelected(value);
++
++  const [inputValue, setInputValue] = useState("");
++  const debouncedInput = useDebounce(inputValue, DEBOUNCE_MS);
++  const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
++  const [isLoading, setIsLoading] = useState(false);
++  const [fallback, setFallback] = useState(false);
++  const [fallbackText, setFallbackText] = useState(selected?.value ?? "");
++  const [focusFallback, setFocusFallback] = useState(false);
++
++  const selectedRef = useRef(selected);
++  selectedRef.current = selected;
++  const setValueRef = useRef(setValue);
++  setValueRef.current = setValue;
++  const inputValueRef = useRef("");
++  const sessionTokenRef = useRef<string>(newPlacesSessionToken());
++  const hasSucceededRef = useRef(false);
++  const latestPlaceIdRef = useRef<string | null>(null);
++  const mountedRef = useRef(true);
++
++  useEffect(() => {
++    mountedRef.current = true;
++    return () => {
++      mountedRef.current = false;
++    };
++  }, []);
++
++  const updateInput = (next: string) => {
++    inputValueRef.current = next;
++    setInputValue(next);
++  };
++
++  // Switch to the plain text input without losing what the booker already typed.
++  const enterFallback = () => {
++    const typed = inputValueRef.current;
++    setFallbackText(typed || selectedRef.current?.value || "");
++    if (typed.trim() && !selectedRef.current) {
++      setValueRef.current(freeTextValue(typed));
++    }
++    setFocusFallback(!!typed);
++    setFallback(true);
++  };
++
++  useEffect(() => {
++    if (fallback) return;
++    const query = debouncedInput.trim();
++    if (query.length < MIN_QUERY_LENGTH) {
++      setSuggestions([]);
++      setIsLoading(false);
++      return;
++    }
++
++    const controller = new AbortController();
++    const params = new URLSearchParams({ input: query, sessionToken: sessionTokenRef.current });
++    const language = i18n?.language;
++    if (language) params.set("lang", language.slice(0, 10));
++
++    setIsLoading(true);
++    fetch(`/api/places/autocomplete?${params.toString()}`, { signal: controller.signal })
++      .then(async (res) => {
++        if (res.status === 503) {
++          enterFallback();
++          return;
++        }
++        if (!res.ok) {
++          setSuggestions([]);
++          return;
++        }
++        const data = await res.json();
++        if (data?.enabled === false) {
++          enterFallback();
++          return;
++        }
++        hasSucceededRef.current = true;
++        setSuggestions(Array.isArray(data?.suggestions) ? data.suggestions : []);
++      })
++      .catch((error: unknown) => {
++        if ((error as { name?: string })?.name === "AbortError") return;
++        // Only give up on search if it never worked; later network blips just show no suggestions.
++        if (!hasSucceededRef.current) {
++          enterFallback();
++        } else {
++          setSuggestions([]);
++        }
++      })
++      .finally(() => {
++        if (!controller.signal.aborted) setIsLoading(false);
++      });
++
++    return () => controller.abort();
++  }, [debouncedInput, fallback, i18n?.language]);
++
++  const fetchDetails = (suggestion: Suggestion, sessionToken: string) => {
++    const params = new URLSearchParams({ sessionToken });
++    fetch(`/api/places/details/${encodeURIComponent(suggestion.placeId)}?${params.toString()}`)
++      .then((res) => (res.ok ? res.json() : null))
++      .then((data) => {
++        const place = data?.place;
++        if (!place || !mountedRef.current) return;
++        // The booker may have picked something else while details were loading.
++        if (latestPlaceIdRef.current !== suggestion.placeId) return;
++        const placeName = typeof place.name === "string" && place.name ? place.name : suggestion.mainText;
++        const address =
++          typeof place.address === "string" && place.address ? place.address : suggestion.secondaryText;
++        const full = normalizeBusinessPlace({
++          ...place,
++          placeId: suggestion.placeId,
++          name: placeName,
++          address,
++          value: buildBusinessPlaceSummary(placeName, address),
++        });
++        if (full) setValue(full);
++      })
++      .catch(() => {
++        // Keep the optimistic value from the prediction.
++      });
++  };
++
++  const options = useMemo<Option[]>(() => {
++    const predictionOptions: Option[] = suggestions.map((suggestion) => ({
++      kind: "prediction",
++      value: suggestion.placeId,
++      label: suggestion.mainText,
++      suggestion,
++    }));
++    const typed = inputValue.trim();
++    if (typed) {
++      predictionOptions.push({
++        kind: "freeText",
++        value: `__free_text__:${typed}`,
++        // React escapes the text; i18next escaping would show "&amp;" for "Smith & Sons".
++        label: t("use_as_entered", { text: typed, interpolation: { escapeValue: false } }),
++        text: typed,
++      });
++    }
++    return predictionOptions;
++  }, [suggestions, inputValue, t]);
++
++  const isDisabled = !!(readOnly || disabled);
++
++  if (fallback) {
++    return (
++      <div className="relative flex items-center">
++        <Icon
++          name="building"
++          className="text-muted absolute left-0.5 ml-3 h-4 w-4 -translate-y-1/2"
++          style={{ top: "44%" }}
++        />
++        <Input
++          id={id}
++          name={name}
++          placeholder={placeholder}
++          disabled={isDisabled}
++          autoFocus={focusFallback}
++          autoComplete="organization"
++          value={fallbackText}
++          onChange={(e) => {
++            const text = e.target.value;
++            setFallbackText(text);
++            setValue(text.trim() ? freeTextValue(text) : "");
++          }}
++          className="pl-10"
++        />
++      </div>
++    );
++  }
++
++  const selectedOption: Option | null = selected
++    ? { kind: "selected", value: "__selected__", label: selected.value }
++    : null;
++
++  return (
++    <Select<Option>
++      inputId={id}
++      placeholder={placeholder || t("type_to_search_business")}
++      isDisabled={isDisabled}
++      isClearable
++      isSearchable
++      isLoading={isLoading}
++      value={selectedOption}
++      options={options}
++      inputValue={inputValue}
++      filterOption={() => true}
++      openMenuOnClick={false}
++      openMenuOnFocus={false}
++      blurInputOnSelect
++      menuPlacement="auto"
++      components={{ DropdownIndicator: null, IndicatorSeparator: null }}
++      noOptionsMessage={() =>
++        inputValue.trim().length < MIN_QUERY_LENGTH ? t("type_to_search_business") : t("no_businesses_found")
++      }
++      formatOptionLabel={(option: Option, meta: FormatOptionLabelMeta<Option>) => {
++        if (meta.context === "value") {
++          return <span className="truncate">{option.label}</span>;
++        }
++        if (option.kind === "prediction") {
++          return (
++            <div className="flex min-w-0 flex-col">
++              <span className="text-emphasis truncate">{option.suggestion.mainText}</span>
++              {option.suggestion.secondaryText ? (
++                <span className="text-subtle truncate text-xs">{option.suggestion.secondaryText}</span>
++              ) : null}
++            </div>
++          );
++        }
++        return <span className="text-default italic">{option.label}</span>;
++      }}
++      onInputChange={(newValue: string, meta: InputActionMeta) => {
++        if (meta.action === "input-change") {
++          updateInput(newValue);
++          return;
++        }
++        if (meta.action === "input-blur") {
++          const typed = inputValueRef.current.trim();
++          // Don't lose a typed answer on tab-out, but never overwrite an existing selection.
++          if (typed && !selected) {
++            latestPlaceIdRef.current = null;
++            setValue(freeTextValue(typed));
++          }
++          updateInput("");
++        }
++      }}
++      onChange={(option: SingleValue<Option>) => {
++        if (!option) {
++          latestPlaceIdRef.current = null;
++          setSuggestions([]);
++          updateInput("");
++          sessionTokenRef.current = newPlacesSessionToken();
++          setValue("");
++          return;
++        }
++        if (option.kind === "freeText") {
++          latestPlaceIdRef.current = null;
++          updateInput("");
++          setValue(freeTextValue(option.text));
++          return;
++        }
++        if (option.kind === "prediction") {
++          const { suggestion } = option;
++          latestPlaceIdRef.current = suggestion.placeId;
++          updateInput("");
++          setSuggestions([]);
++          const optimistic = normalizeBusinessPlace({
++            value: buildBusinessPlaceSummary(suggestion.mainText, suggestion.secondaryText),
++            name: suggestion.mainText,
++            address: suggestion.secondaryText,
++            placeId: suggestion.placeId,
++          });
++          if (optimistic) setValue(optimistic);
++          // The details call closes the billing session; start a fresh one for any later search.
++          const sessionToken = sessionTokenRef.current;
++          sessionTokenRef.current = newPlacesSessionToken();
++          fetchDetails(suggestion, sessionToken);
++        }
++      }}
++    />
++  );
++}
++
++export default BusinessPlaceInput;
+diff --git a/apps/web/modules/form-builder/components/Components.tsx b/apps/web/modules/form-builder/components/Components.tsx
+index bb20266..4ba8e60 100644
+--- a/apps/web/modules/form-builder/components/Components.tsx
++++ b/apps/web/modules/form-builder/components/Components.tsx
+@@ -17,11 +17,16 @@ import { RadioGroup, RadioField } from "@calcom/ui/components/radio";
+ import { Tooltip } from "@calcom/ui/components/tooltip";
+ import { XIcon } from "@coss/ui/icons";
+ 
++import { BusinessPlaceInput, type BusinessPlaceInputProps } from "./BusinessPlaceInput";
+ import { ComponentForField } from "./FormBuilderField";
+ import { propsTypes } from "@calcom/features/form-builder/propsTypes";
+ import { preprocessNameFieldDataWithVariant } from "@calcom/features/form-builder/utils";
+ 
+ export const isValidValueProp: Record<Component["propsType"], (val: unknown) => boolean> = {
++  // Lenient on purpose: an unrecognised object (e.g. after a question's type was changed) renders as
++  // empty instead of crashing the booker. The schema does the real validation.
++  businessPlace: (val) =>
++    typeof val === "string" || (typeof val === "object" && val !== null && !Array.isArray(val)),
+   boolean: (val) => typeof val === "boolean",
+   multiselect: (val) => val instanceof Array && val.every((v) => typeof v === "string"),
+   objectiveWithInput: (val) => (typeof val === "object" && val !== null ? "value" in val : false),
+@@ -83,6 +88,16 @@ type Component =
+       >(
+         props: TProps
+       ) => JSX.Element;
++    }
++  | {
++      propsType: "businessPlace";
++      factory: <
++        TProps extends Omit<BusinessPlaceInputProps, "id" | "disabled"> & {
++          label?: string;
++        },
++      >(
++        props: TProps
++      ) => JSX.Element;
+     };
+ 
+ // TODO: Share FormBuilder components across react-query-awesome-builder(for Routing Forms) widgets.
+@@ -555,5 +570,12 @@ export const Components: Record<FieldType, Component> = {
+       return <Widgets.TextWidget type="url" autoComplete="url" noLabel={true} {...props} />;
+     },
+   },
++  businessPlace: {
++    propsType: propsTypes.businessPlace,
++    factory: (props) => {
++      const { label: _label, ...rest } = props;
++      return <BusinessPlaceInput id={props.name} {...rest} disabled={props.readOnly} />;
++    },
++  },
+ } as const;
+ // Should use `satisfies` to check if the `type` is from supported types. But satisfies doesn't work with Next.js config
+diff --git a/apps/web/modules/form-builder/components/FormBuilderField.tsx b/apps/web/modules/form-builder/components/FormBuilderField.tsx
+index 0934b6f..f812cb8 100644
+--- a/apps/web/modules/form-builder/components/FormBuilderField.tsx
++++ b/apps/web/modules/form-builder/components/FormBuilderField.tsx
+@@ -3,6 +3,7 @@ import type { TFunction } from "i18next";
+ import { Controller, useFormContext } from "react-hook-form";
+ import type { z } from "zod";
+ 
++import type { BusinessPlaceValue } from "@calcom/lib/bookings/businessPlace";
+ import { useLocale } from "@calcom/lib/hooks/useLocale";
+ import { markdownToSafeHTML } from "@calcom/lib/markdownToSafeHTML";
+ import classNames from "@calcom/ui/classNames";
+@@ -58,6 +59,10 @@ type ValueProps =
+   | {
+       value: boolean;
+       setValue: (value: boolean) => void;
++    }
++  | {
++      value: BusinessPlaceValue | "";
++      setValue: (value: BusinessPlaceValue | "") => void;
+     };
+ 
+ export const FormBuilderField = ({
+@@ -289,6 +294,21 @@ export const ComponentForField = ({
+     );
+   }
+ 
++  if (componentConfig.propsType === "businessPlace") {
++    return (
++      <WithLabel field={field} htmlFor={field.name} readOnly={readOnly} noLabel={noLabel}>
++        <componentConfig.factory
++          placeholder={field.placeholder}
++          name={field.name}
++          label={field.label}
++          readOnly={readOnly}
++          value={value as BusinessPlaceValue | string | undefined}
++          setValue={setValue as (arg: BusinessPlaceValue | "") => void}
++        />
++      </WithLabel>
++    );
++  }
++
+   if (componentConfig.propsType === "boolean") {
+     return (
+       <WithLabel field={field} htmlFor={field.name} readOnly={readOnly} noLabel={noLabel}>
+diff --git a/packages/features/bookings/lib/getBookingResponsesSchema.test.ts b/packages/features/bookings/lib/getBookingResponsesSchema.test.ts
+index 2f16bbf..3a5bef5 100644
+--- a/packages/features/bookings/lib/getBookingResponsesSchema.test.ts
++++ b/packages/features/bookings/lib/getBookingResponsesSchema.test.ts
+@@ -2521,3 +2521,205 @@ describe("getBookingResponsesPartialSchema - Prefill validation", () => {
+     expect(parsedResponses.success).toBe(true);
+   });
+ });
++
++describe("Field Type: businessPlace", () => {
++  const PLACE_ID = "ChIJN1t_tDeuEmsRUsoyG83frY4";
++  const CUSTOM_INVALID_BUSINESS_PLACE_MSG = "invalid_business_place";
++
++  const getFields = ({ required = true, hidden = false }: { required?: boolean; hidden?: boolean } = {}) =>
++    [
++      { name: "name", type: "name", required: true },
++      { name: "email", type: "email", required: true },
++      { name: "business", type: "businessPlace", required, hidden },
++    ] as z.infer<typeof eventTypeBookingFields> & z.BRAND<"HAS_SYSTEM_FIELDS">;
++
++  test(`should accept a structured value and strip unknown keys`, async ({}) => {
++    const schema = getBookingResponsesSchema({ bookingFields: getFields(), view: "ALL_VIEWS" });
++    const parsedResponses = await schema.safeParseAsync({
++      email: "test@test.com",
++      name: "test",
++      business: {
++        value: "Acme Plumbing — 1 Main St",
++        name: "Acme Plumbing",
++        placeId: PLACE_ID,
++        address: "1 Main St",
++        phone: "+1 512-555-0100",
++        website: "acme.example",
++        mapsUrl: "https://maps.google.com/?cid=123",
++        category: "Plumber",
++        rating: "4.9",
++      },
++    });
++    expectResponsesToBe(parsedResponses, {
++      email: "test@test.com",
++      name: "test",
++      business: {
++        value: "Acme Plumbing — 1 Main St",
++        name: "Acme Plumbing",
++        placeId: PLACE_ID,
++        address: "1 Main St",
++        phone: "+1 512-555-0100",
++        website: "https://acme.example",
++        mapsUrl: "https://maps.google.com/?cid=123",
++        category: "Plumber",
++      },
++    });
++  });
++
++  test(`should turn a plain string into a free-text business`, async ({}) => {
++    const schema = getBookingResponsesSchema({ bookingFields: getFields(), view: "ALL_VIEWS" });
++    const parsedResponses = await schema.safeParseAsync({
++      email: "test@test.com",
++      name: "test",
++      business: "  Corner Bakery ",
++    });
++    expectResponsesToBe(parsedResponses, {
++      email: "test@test.com",
++      name: "test",
++      business: { value: "Corner Bakery", name: "Corner Bakery" },
++    });
++  });
++
++  test(`should drop unsafe links`, async ({}) => {
++    const schema = getBookingResponsesSchema({ bookingFields: getFields(), view: "ALL_VIEWS" });
++    const parsedResponses = await schema.safeParseAsync({
++      email: "test@test.com",
++      name: "test",
++      business: {
++        value: "Acme",
++        name: "Acme",
++        website: "javascript:alert(1)",
++        mapsUrl: "https://evil.example/maps",
++      },
++    });
++    expectResponsesToBe(parsedResponses, {
++      email: "test@test.com",
++      name: "test",
++      business: { value: "Acme", name: "Acme" },
++    });
++  });
++
++  test(`should truncate an overlong name`, async ({}) => {
++    const schema = getBookingResponsesSchema({ bookingFields: getFields(), view: "ALL_VIEWS" });
++    const parsedResponses = await schema.safeParseAsync({
++      email: "test@test.com",
++      name: "test",
++      business: { name: "A".repeat(300) },
++    });
++    expect(parsedResponses.success).toBe(true);
++    const business = (parsedResponses.data as Record<string, { name: string }>).business;
++    expect(business.name).toHaveLength(200);
++  });
++
++  test(`should fail when required and empty`, async ({}) => {
++    const schema = getBookingResponsesSchema({ bookingFields: getFields(), view: "ALL_VIEWS" });
++    const parsedResponses = await schema.safeParseAsync({
++      email: "test@test.com",
++      name: "test",
++      business: "",
++    });
++    expectParsingToFail(
++      parsedResponses,
++      expect.objectContaining({
++        code: "custom",
++        message: `{business}${CUSTOM_REQUIRED_FIELD_ERROR_MSG}`,
++      })
++    );
++  });
++
++  test(`should fail when required and missing`, async ({}) => {
++    const schema = getBookingResponsesSchema({ bookingFields: getFields(), view: "ALL_VIEWS" });
++    const parsedResponses = await schema.safeParseAsync({ email: "test@test.com", name: "test" });
++    expectParsingToFail(
++      parsedResponses,
++      expect.objectContaining({
++        code: "custom",
++        message: `{business}${CUSTOM_REQUIRED_FIELD_ERROR_MSG}`,
++      })
++    );
++  });
++
++  test(`should fail when required and the object has no usable name`, async ({}) => {
++    const schema = getBookingResponsesSchema({ bookingFields: getFields(), view: "ALL_VIEWS" });
++    const parsedResponses = await schema.safeParseAsync({
++      email: "test@test.com",
++      name: "test",
++      business: { address: "1 Main St" },
++    });
++    expectParsingToFail(
++      parsedResponses,
++      expect.objectContaining({
++        code: "custom",
++        message: `{business}${CUSTOM_REQUIRED_FIELD_ERROR_MSG}`,
++      })
++    );
++  });
++
++  test(`should pass when optional and missing or empty`, async ({}) => {
++    const schema = getBookingResponsesSchema({ bookingFields: getFields({ required: false }), view: "ALL_VIEWS" });
++    expectResponsesToBe(await schema.safeParseAsync({ email: "test@test.com", name: "test" }), {
++      email: "test@test.com",
++      name: "test",
++    });
++    expectResponsesToBe(await schema.safeParseAsync({ email: "test@test.com", name: "test", business: "" }), {
++      email: "test@test.com",
++      name: "test",
++      business: "",
++    });
++  });
++
++  test(`should pass when hidden, required and missing`, async ({}) => {
++    const schema = getBookingResponsesSchema({
++      bookingFields: getFields({ required: true, hidden: true }),
++      view: "ALL_VIEWS",
++    });
++    expectResponsesToBe(await schema.safeParseAsync({ email: "test@test.com", name: "test" }), {
++      email: "test@test.com",
++      name: "test",
++    });
++  });
++
++  test(`should fail for a malformed place id`, async ({}) => {
++    const schema = getBookingResponsesSchema({ bookingFields: getFields(), view: "ALL_VIEWS" });
++    const parsedResponses = await schema.safeParseAsync({
++      email: "test@test.com",
++      name: "test",
++      business: { value: "Acme", name: "Acme", placeId: "../../etc" },
++    });
++    expectParsingToFail(
++      parsedResponses,
++      expect.objectContaining({
++        code: "custom",
++        message: `{business}${CUSTOM_INVALID_BUSINESS_PLACE_MSG}`,
++      })
++    );
++  });
++
++  describe("prefill (partial schema)", () => {
++    test(`should parse a JSON string into a structured value`, async ({}) => {
++      const schema = getBookingResponsesPartialSchema({ bookingFields: getFields(), view: "ALL_VIEWS" });
++      const parsedResponses = await schema.parseAsync({
++        business: JSON.stringify({ name: "Acme", address: "1 Main St", placeId: PLACE_ID }),
++      });
++      expect(parsedResponses).toEqual(
++        expect.objectContaining({
++          business: { value: "Acme — 1 Main St", name: "Acme", address: "1 Main St", placeId: PLACE_ID },
++        })
++      );
++    });
++
++    test(`should prefill a plain string as free text`, async ({}) => {
++      const schema = getBookingResponsesPartialSchema({ bookingFields: getFields(), view: "ALL_VIEWS" });
++      const parsedResponses = await schema.parseAsync({ business: "Acme" });
++      expect(parsedResponses).toEqual(expect.objectContaining({ business: { value: "Acme", name: "Acme" } }));
++    });
++
++    test(`should skip an invalid prefill without failing`, async ({}) => {
++      const schema = getBookingResponsesPartialSchema({ bookingFields: getFields(), view: "ALL_VIEWS" });
++      const parsedResponses = await schema.parseAsync({
++        business: { value: "Acme", name: "Acme", placeId: "bad id" },
++      });
++      expect(parsedResponses).not.toHaveProperty("business");
++    });
++  });
++});
+diff --git a/packages/features/ee/workflows/lib/reminders/templates/customTemplate.ts b/packages/features/ee/workflows/lib/reminders/templates/customTemplate.ts
+index f02a558..a9912de 100644
+--- a/packages/features/ee/workflows/lib/reminders/templates/customTemplate.ts
++++ b/packages/features/ee/workflows/lib/reminders/templates/customTemplate.ts
+@@ -2,6 +2,7 @@ import { guessEventLocationType } from "@calcom/app-store/locations";
+ import type { FORM_SUBMITTED_WEBHOOK_RESPONSES } from "@calcom/app-store/routing-forms/lib/formSubmissionUtils";
+ import type { Dayjs } from "@calcom/dayjs";
+ import dayjs from "@calcom/dayjs";
++import { formatBusinessPlaceText, isBusinessPlaceValue } from "@calcom/lib/bookings/businessPlace";
+ import { APP_NAME } from "@calcom/lib/constants";
+ import { TimeFormat } from "@calcom/lib/timeFormat";
+ import type { CalEventResponses } from "@calcom/types/Calendar";
+@@ -237,7 +238,9 @@ const customTemplate = (
+             const responseValue = response.value;
+             const valueString = Array.isArray(responseValue)
+               ? responseValue.join(", ")
+-              : String(responseValue);
++              : isBusinessPlaceValue(responseValue)
++                ? formatBusinessPlaceText(responseValue)
++                : String(responseValue);
+ 
+             dynamicText = dynamicText.replace(`{${foundVariableInTemplate}}`, valueString);
+           }
+diff --git a/packages/features/form-builder/fieldTypes.ts b/packages/features/form-builder/fieldTypes.ts
+index 9ae8db1..86f2bb1 100644
+--- a/packages/features/form-builder/fieldTypes.ts
++++ b/packages/features/form-builder/fieldTypes.ts
+@@ -165,6 +165,11 @@ const configMap: Record<FieldType, Omit<z.infer<typeof fieldTypeConfigSchema>, "
+     value: "url",
+     isTextType: true,
+   },
++  businessPlace: {
++    label: "Business (Google)",
++    value: "businessPlace",
++    isTextType: true,
++  },
+ };
+ 
+ export const fieldTypesConfigMap = configMap as Record<FieldType, z.infer<typeof fieldTypeConfigSchema>>;
+diff --git a/packages/features/form-builder/propsTypes.ts b/packages/features/form-builder/propsTypes.ts
+index 9a47995..348a58b 100644
+--- a/packages/features/form-builder/propsTypes.ts
++++ b/packages/features/form-builder/propsTypes.ts
+@@ -14,4 +14,5 @@ export const propsTypes = {
+   radio: "select",
+   boolean: "boolean",
+   url: "text",
++  businessPlace: "businessPlace",
+ } as const;
+diff --git a/packages/features/form-builder/schema.ts b/packages/features/form-builder/schema.ts
+index cda2f8e..d6f0c2f 100644
+--- a/packages/features/form-builder/schema.ts
++++ b/packages/features/form-builder/schema.ts
+@@ -1,3 +1,9 @@
++import {
++  BUSINESS_PLACE_ID_REGEX,
++  type BusinessPlaceValue,
++  isBusinessPlaceValue,
++  normalizeBusinessPlace,
++} from "@calcom/lib/bookings/businessPlace";
+ import { fieldSchema, fieldTypeEnum, variantsConfigSchema } from "@calcom/prisma/zod-utils";
+ import { z } from "zod";
+ import { fieldTypesConfigMap } from "./fieldTypes";
+@@ -53,6 +59,7 @@ export const fieldTypeConfigSchema = z
+       "boolean",
+       "objectiveWithInput",
+       "variants",
++      "businessPlace",
+     ]),
+     // It is the config that can tweak what an existing or a new field shows in the App UI or booker UI.
+     variantsConfig: z
+@@ -291,6 +298,35 @@ export const fieldTypesSchemaMap = {
+       });
+     },
+   }),
++  businessPlace: defineFieldSchema<unknown, BusinessPlaceValue | "">({
++    preprocess: ({ response }) => {
++      // "" (not an empty object) means nothing entered, so the generic required check (`!value`) works.
++      if (response === null || response === undefined) return "";
++      if (typeof response === "string") {
++        const trimmed = response.trim();
++        if (!trimmed) return "";
++        if (trimmed.startsWith("{")) {
++          try {
++            return normalizeBusinessPlace(JSON.parse(trimmed));
++          } catch {
++            // Not JSON, treat it as a typed business name
++          }
++        }
++        // Free text, or a `?field=Acme` prefill
++        return normalizeBusinessPlace({ value: trimmed, name: trimmed });
++      }
++      return typeof response === "object" ? normalizeBusinessPlace(response) : "";
++    },
++    superRefine: ({ response, ctx, m }) => {
++      if (response === "") return;
++      if (
++        !isBusinessPlaceValue(response) ||
++        (response.placeId !== undefined && !BUSINESS_PLACE_ID_REGEX.test(response.placeId))
++      ) {
++        ctx.addIssue({ code: z.ZodIssueCode.custom, message: m("invalid_business_place") });
++      }
++    },
++  }),
+ };
+ 
+ export type FieldZodCtx = {
+diff --git a/packages/features/form-builder/useShouldBeDisabledDueToPrefill.tsx b/packages/features/form-builder/useShouldBeDisabledDueToPrefill.tsx
+index 3eb619d..fddad79 100644
+--- a/packages/features/form-builder/useShouldBeDisabledDueToPrefill.tsx
++++ b/packages/features/form-builder/useShouldBeDisabledDueToPrefill.tsx
+@@ -61,7 +61,9 @@ export const useShouldBeDisabledDueToPrefill = (field: FieldProps): boolean => {
+   const prefilledValues = getValues()?.responses || {};
+   // radioInput and variantsConfig type fields have complex transformations, so we can't directly compare them with search params
+   // e.g. name = John Doe in search params will be transformed to {firstName: John, lastName: Doe} and we can't directly compare it with toPrefill value
+-  const shouldMatchPrefilledValue = field.type !== "radioInput" && !field.variantsConfig;
++  // businessPlace values are objects, so they can't be compared to the search param via toString()
++  const shouldMatchPrefilledValue =
++    field.type !== "radioInput" && field.type !== "businessPlace" && !field.variantsConfig;
+   const errorMessage = (formState?.errors?.responses?.message || "") as string;
+   const fieldNameThatHasError = getFieldNameFromErrorMessage(errorMessage);
+   if (fieldNameThatHasError === field.name) {
+diff --git a/packages/features/tasker/tasks/executeAIPhoneCall.ts b/packages/features/tasker/tasks/executeAIPhoneCall.ts
+index 7c924dd..5b52c06 100644
+--- a/packages/features/tasker/tasks/executeAIPhoneCall.ts
++++ b/packages/features/tasker/tasks/executeAIPhoneCall.ts
+@@ -10,6 +10,7 @@ import {
+   getSubmitterEmail,
+   getSubmitterName,
+ } from "@calcom/features/tasker/tasks/triggerFormSubmittedNoEvent/formSubmissionValidation";
++import { formatBusinessPlaceText, isBusinessPlaceValue } from "@calcom/lib/bookings/businessPlace";
+ import { checkRateLimitAndThrowError } from "@calcom/lib/checkRateLimitAndThrowError";
+ import logger from "@calcom/lib/logger";
+ import prisma from "@calcom/prisma";
+@@ -45,7 +46,9 @@ export function convertResponsesToVariableFormats(
+   return Object.fromEntries(
+     Object.entries(responses).flatMap(([key, value]) => {
+       const formats = getVariableFormats(key);
+-      const valueStr = value.value?.toString() || "";
++      const valueStr = isBusinessPlaceValue(value.value)
++        ? formatBusinessPlaceText(value.value)
++        : value.value?.toString() || "";
+       return formats.map((format) => [format, valueStr]);
+     })
+   );
+diff --git a/packages/i18n/locales/en/common.json b/packages/i18n/locales/en/common.json
+index 1d14645..6ed1f78 100644
+--- a/packages/i18n/locales/en/common.json
++++ b/packages/i18n/locales/en/common.json
+@@ -4680,5 +4680,9 @@
+   "paypal_step_7": "You should be all set up after this.",
+   "dashboard": "dashboard",
+   "paypal_webhook_reminder": "Our integration creates a specific webhook on your PayPal account that we use to report back transactions to our system. If you delete this webhook, we will not be able to report back and you should uninstall and install the app again for this to work properly. Uninstalling the app won't delete your current event type price/currency configuration but you will not be able to receive bookings.",
++  "invalid_business_place": "Please choose a business from the list or enter a business name.",
++  "use_as_entered": "Use \"{{text}}\" as entered",
++  "type_to_search_business": "Type to search for your business",
++  "no_businesses_found": "No businesses found",
+   "ADD_NEW_STRINGS_ABOVE_THIS_LINE_TO_PREVENT_MERGE_CONFLICTS": "↑↑↑↑↑↑↑↑↑↑↑↑↑ Add your new strings above here ↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑"
+ }
+diff --git a/packages/lib/bookings/businessPlace.test.ts b/packages/lib/bookings/businessPlace.test.ts
+new file mode 100644
+index 0000000..5c2484e
+--- /dev/null
++++ b/packages/lib/bookings/businessPlace.test.ts
+@@ -0,0 +1,214 @@
++import { describe, expect, it } from "vitest";
++
++import {
++  buildBusinessPlaceSummary,
++  formatBusinessPlaceText,
++  getBusinessPlaceLines,
++  isBusinessPlaceValue,
++  normalizeBusinessPlace,
++} from "./businessPlace";
++
++const PLACE_ID = "ChIJN1t_tDeuEmsRUsoyG83frY4";
++
++describe("isBusinessPlaceValue", () => {
++  it("accepts a structured value", () => {
++    expect(isBusinessPlaceValue({ value: "Acme — 1 Main St", name: "Acme", placeId: PLACE_ID })).toBe(true);
++    expect(isBusinessPlaceValue({ value: "Acme", name: "Acme" })).toBe(true);
++  });
++
++  it("rejects the radioInput/location shape", () => {
++    expect(isBusinessPlaceValue({ value: "Acme", optionValue: "x", name: "Acme" })).toBe(false);
++  });
++
++  it("rejects the name field shape", () => {
++    expect(isBusinessPlaceValue({ firstName: "Jane", lastName: "Doe" })).toBe(false);
++  });
++
++  it("rejects primitives, arrays and null", () => {
++    expect(isBusinessPlaceValue("Acme")).toBe(false);
++    expect(isBusinessPlaceValue(["Acme"])).toBe(false);
++    expect(isBusinessPlaceValue(null)).toBe(false);
++    expect(isBusinessPlaceValue(undefined)).toBe(false);
++  });
++
++  it("rejects known keys holding non-strings", () => {
++    expect(isBusinessPlaceValue({ value: "Acme", name: "Acme", phone: 5551234 })).toBe(false);
++  });
++});
++
++describe("buildBusinessPlaceSummary", () => {
++  it("joins name and address", () => {
++    expect(buildBusinessPlaceSummary("Acme", "1 Main St")).toBe("Acme — 1 Main St");
++  });
++
++  it("returns just the name without an address", () => {
++    expect(buildBusinessPlaceSummary(" Acme ")).toBe("Acme");
++    expect(buildBusinessPlaceSummary("Acme", "  ")).toBe("Acme");
++  });
++});
++
++describe("normalizeBusinessPlace", () => {
++  it("keeps known keys, trims them and strips unknown and empty keys", () => {
++    expect(
++      normalizeBusinessPlace({
++        value: " Acme — 1 Main St ",
++        name: " Acme ",
++        placeId: PLACE_ID,
++        address: "1 Main St",
++        phone: "+1 555-123-4567",
++        category: "  ",
++        rating: "4.8",
++        nested: { evil: true },
++      })
++    ).toEqual({
++      value: "Acme — 1 Main St",
++      name: "Acme",
++      placeId: PLACE_ID,
++      address: "1 Main St",
++      phone: "+1 555-123-4567",
++    });
++  });
++
++  it("returns an empty string when there is no usable name", () => {
++    expect(normalizeBusinessPlace({})).toBe("");
++    expect(normalizeBusinessPlace({ value: "   " })).toBe("");
++    expect(normalizeBusinessPlace({ address: "1 Main St" })).toBe("");
++    expect(normalizeBusinessPlace("Acme")).toBe("");
++    expect(normalizeBusinessPlace(null)).toBe("");
++    expect(normalizeBusinessPlace(["Acme"])).toBe("");
++  });
++
++  it("fills the name from the value", () => {
++    expect(normalizeBusinessPlace({ value: "Acme" })).toEqual({ value: "Acme", name: "Acme" });
++  });
++
++  it("builds the value summary from name and address", () => {
++    expect(normalizeBusinessPlace({ name: "Acme", address: "1 Main St" })).toEqual({
++      value: "Acme — 1 Main St",
++      name: "Acme",
++      address: "1 Main St",
++    });
++  });
++
++  it("prefixes bare-domain websites with https", () => {
++    expect(normalizeBusinessPlace({ name: "Acme", website: "acme.com" })).toMatchObject({
++      website: "https://acme.com",
++    });
++    expect(normalizeBusinessPlace({ name: "Acme", website: "www.acme.com/contact" })).toMatchObject({
++      website: "https://www.acme.com/contact",
++    });
++  });
++
++  it("keeps http(s) websites", () => {
++    expect(normalizeBusinessPlace({ name: "Acme", website: "http://acme.com/" })).toMatchObject({
++      website: "http://acme.com/",
++    });
++  });
++
++  it("drops unsafe or invalid websites", () => {
++    for (const website of ["javascript:alert(1)", "data:text/html,hi", "ftp://acme.com", "not a url", "acme"]) {
++      expect(normalizeBusinessPlace({ name: "Acme", website })).toEqual({ value: "Acme", name: "Acme" });
++    }
++  });
++
++  it("keeps only https Google Maps links", () => {
++    expect(
++      normalizeBusinessPlace({ name: "Acme", mapsUrl: "https://maps.google.com/?cid=123" })
++    ).toMatchObject({ mapsUrl: "https://maps.google.com/?cid=123" });
++    expect(normalizeBusinessPlace({ name: "Acme", mapsUrl: "https://www.google.co.uk/maps/x" })).toMatchObject({
++      mapsUrl: "https://www.google.co.uk/maps/x",
++    });
++    for (const mapsUrl of [
++      "https://evil.com/?cid=123",
++      "https://google.evil.com/maps",
++      "https://notgoogle.com/maps",
++      "http://maps.google.com/?cid=123",
++      "javascript:alert(1)",
++    ]) {
++      expect(normalizeBusinessPlace({ name: "Acme", mapsUrl })).toEqual({ value: "Acme", name: "Acme" });
++    }
++  });
++
++  it("truncates long text fields", () => {
++    const result = normalizeBusinessPlace({ name: "A".repeat(250), address: "B".repeat(400) });
++    expect(result).not.toBe("");
++    if (!result) return;
++    expect(result.name).toHaveLength(200);
++    expect(result.address).toHaveLength(300);
++    expect(result.value.length).toBeLessThanOrEqual(500);
++  });
++
++  it("drops an overlong phone number instead of truncating it", () => {
++    expect(normalizeBusinessPlace({ name: "Acme", phone: "1".repeat(41) })).toEqual({
++      value: "Acme",
++      name: "Acme",
++    });
++  });
++
++  it("does not truncate the place id", () => {
++    const longId = "a".repeat(600);
++    expect(normalizeBusinessPlace({ name: "Acme", placeId: longId })).toMatchObject({ placeId: longId });
++  });
++});
++
++describe("formatBusinessPlaceText", () => {
++  const full = {
++    value: "Acme — 1 Main St",
++    name: "Acme",
++    placeId: PLACE_ID,
++    address: "1 Main St",
++    phone: "+1 555-123-4567",
++    website: "https://acme.com",
++    mapsUrl: "https://maps.google.com/?cid=1",
++    category: "Plumber",
++  };
++
++  it("formats a single line", () => {
++    expect(formatBusinessPlaceText(full)).toBe("Acme, 1 Main St, +1 555-123-4567, https://acme.com");
++  });
++
++  it("formats multiple lines with category and maps link", () => {
++    expect(formatBusinessPlaceText(full, { multiline: true })).toBe(
++      ["Acme", "1 Main St", "Plumber", "+1 555-123-4567", "https://acme.com", "https://maps.google.com/?cid=1"].join(
++        "\n"
++      )
++    );
++  });
++
++  it("returns just the name for free text", () => {
++    expect(formatBusinessPlaceText({ value: "Acme", name: "Acme" }, { multiline: true })).toBe("Acme");
++  });
++});
++
++describe("getBusinessPlaceLines", () => {
++  it("returns lines with safe hrefs", () => {
++    expect(
++      getBusinessPlaceLines({
++        value: "Acme — 1 Main St",
++        name: "Acme",
++        address: "1 Main St",
++        category: "Plumber",
++        phone: "+1 (555) 123-4567",
++        website: "https://acme.com/",
++        mapsUrl: "https://maps.google.com/?cid=1",
++      })
++    ).toEqual([
++      { kind: "name", text: "Acme" },
++      { kind: "address", text: "1 Main St" },
++      { kind: "category", text: "Plumber" },
++      { kind: "phone", text: "+1 (555) 123-4567", href: "tel:+15551234567" },
++      { kind: "website", text: "acme.com", href: "https://acme.com/" },
++      { kind: "maps", text: "Google Maps", href: "https://maps.google.com/?cid=1" },
++    ]);
++  });
++
++  it("never yields an href for a tampered link", () => {
++    const lines = getBusinessPlaceLines({
++      value: "Acme",
++      name: "Acme",
++      website: "javascript:alert(1)",
++      mapsUrl: "https://evil.com",
++    });
++    expect(lines).toEqual([{ kind: "name", text: "Acme" }]);
++  });
++});
+diff --git a/packages/lib/bookings/businessPlace.ts b/packages/lib/bookings/businessPlace.ts
+new file mode 100644
+index 0000000..36c34a5
+--- /dev/null
++++ b/packages/lib/bookings/businessPlace.ts
+@@ -0,0 +1,182 @@
++/**
++ * Shared, framework-free helpers for the `businessPlace` booking question type.
++ *
++ * A `businessPlace` response is either `""` (nothing entered) or a flat object of strings.
++ * `value` is always a human readable summary so code that unwraps `.value` keeps working.
++ * Absence of `placeId` means the booker typed the business name themselves.
++ */
++
++export type BusinessPlaceValue = {
++  value: string;
++  name: string;
++  placeId?: string;
++  address?: string;
++  phone?: string;
++  website?: string;
++  mapsUrl?: string;
++  category?: string;
++};
++
++const BUSINESS_PLACE_KEYS = [
++  "value",
++  "name",
++  "placeId",
++  "address",
++  "phone",
++  "website",
++  "mapsUrl",
++  "category",
++] as const;
++
++type BusinessPlaceKey = (typeof BUSINESS_PLACE_KEYS)[number];
++
++const MAX_LENGTHS: Record<BusinessPlaceKey, number> = {
++  value: 500,
++  name: 200,
++  placeId: 512,
++  address: 300,
++  phone: 40,
++  website: 500,
++  mapsUrl: 500,
++  category: 100,
++};
++
++export const BUSINESS_PLACE_ID_REGEX = /^[A-Za-z0-9_-]{8,512}$/;
++
++const SUMMARY_SEPARATOR = " — ";
++
++export const isBusinessPlaceValue = (v: unknown): v is BusinessPlaceValue => {
++  if (typeof v !== "object" || v === null || Array.isArray(v)) return false;
++  const obj = v as Record<string, unknown>;
++  // `{ value, optionValue }` is the radioInput/location shape, never ours.
++  if ("optionValue" in obj) return false;
++  if (typeof obj.name !== "string" || typeof obj.value !== "string") return false;
++  return BUSINESS_PLACE_KEYS.every((key) => obj[key] === undefined || typeof obj[key] === "string");
++};
++
++export function buildBusinessPlaceSummary(name: string, address?: string): string {
++  const trimmedName = name.trim();
++  const trimmedAddress = address?.trim();
++  return trimmedAddress ? `${trimmedName}${SUMMARY_SEPARATOR}${trimmedAddress}` : trimmedName;
++}
++
++function parseHttpUrl(raw: string): URL | null {
++  try {
++    const url = new URL(raw);
++    return url.protocol === "https:" || url.protocol === "http:" ? url : null;
++  } catch {
++    return null;
++  }
++}
++
++function normalizeWebsite(raw: string): string | undefined {
++  if (/\s/.test(raw)) return undefined;
++  if (/^https?:\/\//i.test(raw)) {
++    return parseHttpUrl(raw) ? raw : undefined;
++  }
++  // Any other scheme (javascript:, data:, mailto:, ...) is dropped.
++  if (/^[a-z][a-z0-9+.-]*:/i.test(raw)) return undefined;
++  // Bare domains are prefixed, mirroring the `url` field type.
++  if (/^[a-z0-9.-]+\.[a-z]{2,}(\/\S*)?$/i.test(raw)) {
++    const withProtocol = `https://${raw}`;
++    return parseHttpUrl(withProtocol) ? withProtocol : undefined;
++  }
++  return undefined;
++}
++
++function normalizeMapsUrl(raw: string): string | undefined {
++  const url = parseHttpUrl(raw);
++  if (!url || url.protocol !== "https:") return undefined;
++  // Only Google hosts (google.com, google.ca, google.co.uk, google.com.au, ...), so a booker can't plant
++  // arbitrary links that later render as anchors. `google.evil.com` must not pass.
++  return /(^|\.)google\.(com|[a-z]{2}|co\.[a-z]{2}|com\.[a-z]{2})$/i.test(url.hostname) ? raw : undefined;
++}
++
++/**
++ * Turns anything a client or the DB hands us into a safe `BusinessPlaceValue`, or `""` when there
++ * is no usable business name.
++ */
++export function normalizeBusinessPlace(input: unknown): BusinessPlaceValue | "" {
++  if (typeof input !== "object" || input === null || Array.isArray(input)) return "";
++  const raw = input as Record<string, unknown>;
++  const out: Partial<Record<BusinessPlaceKey, string>> = {};
++
++  for (const key of BUSINESS_PLACE_KEYS) {
++    const value = raw[key];
++    if (typeof value !== "string") continue;
++    const trimmed = value.trim();
++    if (!trimmed) continue;
++
++    if (key === "website") {
++      const website = trimmed.length <= MAX_LENGTHS.website ? normalizeWebsite(trimmed) : undefined;
++      if (website) out.website = website;
++    } else if (key === "mapsUrl") {
++      const mapsUrl = trimmed.length <= MAX_LENGTHS.mapsUrl ? normalizeMapsUrl(trimmed) : undefined;
++      if (mapsUrl) out.mapsUrl = mapsUrl;
++    } else if (key === "placeId") {
++      // Validated (not truncated) by the schema; a truncated id would point at the wrong place.
++      out.placeId = trimmed;
++    } else if (key === "phone") {
++      if (trimmed.length <= MAX_LENGTHS.phone) out.phone = trimmed;
++    } else {
++      out[key] = trimmed.slice(0, MAX_LENGTHS[key]);
++    }
++  }
++
++  const name = (out.name || out.value || "").slice(0, MAX_LENGTHS.name).trim();
++  if (!name) return "";
++
++  const result: BusinessPlaceValue = {
++    value: (out.value || buildBusinessPlaceSummary(name, out.address)).slice(0, MAX_LENGTHS.value),
++    name,
++  };
++  if (out.placeId) result.placeId = out.placeId;
++  if (out.address) result.address = out.address;
++  if (out.phone) result.phone = out.phone;
++  if (out.website) result.website = out.website;
++  if (out.mapsUrl) result.mapsUrl = out.mapsUrl;
++  if (out.category) result.category = out.category;
++  return result;
++}
++
++export type BusinessPlaceLine = {
++  kind: "name" | "address" | "category" | "phone" | "website" | "maps";
++  text: string;
++  href?: string;
++};
++
++function displayWebsite(website: string): string {
++  return website.replace(/^https?:\/\//i, "").replace(/\/$/, "");
++}
++
++/**
++ * Structured lines for rendering. Hrefs come from a re-normalised copy, so only http(s) websites,
++ * Google Maps links and `tel:` numbers can ever become anchors.
++ */
++export function getBusinessPlaceLines(input: BusinessPlaceValue): BusinessPlaceLine[] {
++  const v = normalizeBusinessPlace(input);
++  if (!v) return [];
++  const lines: BusinessPlaceLine[] = [{ kind: "name", text: v.name }];
++  if (v.address) lines.push({ kind: "address", text: v.address });
++  if (v.category) lines.push({ kind: "category", text: v.category });
++  if (v.phone) {
++    const dialable = v.phone.replace(/[^\d+]/g, "");
++    lines.push({ kind: "phone", text: v.phone, ...(dialable ? { href: `tel:${dialable}` } : {}) });
++  }
++  if (v.website) lines.push({ kind: "website", text: displayWebsite(v.website), href: v.website });
++  if (v.mapsUrl) lines.push({ kind: "maps", text: "Google Maps", href: v.mapsUrl });
++  return lines;
++}
++
++/**
++ * Plain-text rendering. Single line (workflow variables, AI phone calls) keeps it short;
++ * multiline (emails, calendar descriptions) includes the category and links.
++ */
++export function formatBusinessPlaceText(input: BusinessPlaceValue, opts?: { multiline?: boolean }): string {
++  const v = normalizeBusinessPlace(input);
++  if (!v) return "";
++  if (!opts?.multiline) {
++    return [v.name, v.address, v.phone, v.website].filter(Boolean).join(", ");
++  }
++  return [v.name, v.address, v.category, v.phone, v.website, v.mapsUrl].filter(Boolean).join("\n");
++}
+diff --git a/packages/lib/bookings/getLabelValueMapFromResponses.ts b/packages/lib/bookings/getLabelValueMapFromResponses.ts
+index b072a0e..b68548f 100644
+--- a/packages/lib/bookings/getLabelValueMapFromResponses.ts
++++ b/packages/lib/bookings/getLabelValueMapFromResponses.ts
+@@ -1,6 +1,7 @@
+ import type z from "zod";
+ 
+ import { TITLE_FIELD, SMS_REMINDER_NUMBER_FIELD } from "@calcom/lib/bookings/SystemField";
++import { formatBusinessPlaceText, isBusinessPlaceValue } from "@calcom/lib/bookings/businessPlace";
+ import type { dbReadResponseSchema as bookingResponse } from "@calcom/lib/dbReadResponseSchema";
+ import type { CalEventResponses } from "@calcom/types/Calendar";
+ import type { Prisma } from "@calcom/prisma/client";
+@@ -31,7 +32,11 @@ export default function getLabelValueMapFromResponses(
+       if (!value.label || (!isOrganizer && value.isHidden)) {
+         continue;
+       }
+-      labelValueMap[value.label] = value.value;
++      // businessPlace answers become multiline text, so emails, ICS and calendar descriptions never
++      // render "[object Object]"
++      labelValueMap[value.label] = isBusinessPlaceValue(value.value)
++        ? formatBusinessPlaceText(value.value, { multiline: true })
++        : value.value;
+     }
+   } else {
+     labelValueMap = customInputs as Record<string, string | string[]>;
+diff --git a/packages/lib/server/places/googlePlacesClient.ts b/packages/lib/server/places/googlePlacesClient.ts
+new file mode 100644
+index 0000000..9a67b3c
+--- /dev/null
++++ b/packages/lib/server/places/googlePlacesClient.ts
+@@ -0,0 +1,196 @@
++import { BUSINESS_PLACE_ID_REGEX } from "@calcom/lib/bookings/businessPlace";
++import { HttpError } from "@calcom/lib/http-error";
++import logger from "@calcom/lib/logger";
++
++const log = logger.getSubLogger({ prefix: ["GooglePlaces"] });
++
++const PLACES_BASE_URL = "https://places.googleapis.com/v1";
++const UPSTREAM_TIMEOUT_MS = 4000;
++const MAX_SUGGESTIONS = 8;
++const DEFAULT_REGION_CODES = ["us", "ca"];
++const DETAILS_FIELD_MASK = [
++  "id",
++  "displayName",
++  "formattedAddress",
++  "nationalPhoneNumber",
++  "internationalPhoneNumber",
++  "websiteUri",
++  "googleMapsUri",
++  "primaryTypeDisplayName",
++].join(",");
++
++export type PlaceSuggestion = { placeId: string; mainText: string; secondaryText: string };
++
++export type PlaceDetails = {
++  placeId: string;
++  name: string;
++  address?: string;
++  phone?: string;
++  website?: string;
++  mapsUrl?: string;
++  category?: string;
++};
++
++export function isPlacesEnabled(): boolean {
++  return !!process.env.GOOGLE_PLACES_API_KEY;
++}
++
++export function getRegionCodes(): string[] {
++  const raw = process.env.GOOGLE_PLACES_REGION_CODES;
++  if (!raw) return DEFAULT_REGION_CODES;
++  const codes = raw
++    .split(",")
++    .map((code) => code.trim().toLowerCase())
++    .filter((code) => /^[a-z]{2}$/.test(code));
++  // Places API (New) accepts at most 15 region codes
++  return codes.length ? codes.slice(0, 15) : DEFAULT_REGION_CODES;
++}
++
++function getApiKey(): string {
++  const key = process.env.GOOGLE_PLACES_API_KEY;
++  if (!key) throw new HttpError({ statusCode: 503, message: "places_disabled" });
++  return key;
++}
++
++const asString = (value: unknown): string => (typeof value === "string" ? value.trim() : "");
++
++async function callPlaces(url: string, init: RequestInit, operation: string): Promise<unknown> {
++  let res: Response;
++  try {
++    const signal =
++      typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function"
++        ? AbortSignal.timeout(UPSTREAM_TIMEOUT_MS)
++        : undefined;
++    res = await fetch(url, { ...init, cache: "no-store", signal });
++  } catch (error) {
++    log.error(`${operation} request failed`, error instanceof Error ? error.message : String(error));
++    throw new HttpError({ statusCode: 502, message: "places_upstream_error" });
++  }
++
++  if (!res.ok) {
++    // Log Google's error status for debugging, but never forward its body to the browser.
++    let reason = "";
++    try {
++      const body = (await res.json()) as { error?: { status?: string } };
++      reason = asString(body?.error?.status);
++    } catch {
++      // ignore unparsable bodies
++    }
++    log.error(`${operation} returned HTTP ${res.status}`, reason);
++    throw new HttpError({ statusCode: 502, message: "places_upstream_error" });
++  }
++
++  return res.json();
++}
++
++type RawPrediction = {
++  placeId?: unknown;
++  types?: unknown;
++  text?: { text?: unknown };
++  structuredFormat?: { mainText?: { text?: unknown }; secondaryText?: { text?: unknown } };
++};
++
++export function mapAutocompleteResponse(data: unknown): PlaceSuggestion[] {
++  const suggestions = (data as { suggestions?: unknown })?.suggestions;
++  if (!Array.isArray(suggestions)) return [];
++
++  const result: PlaceSuggestion[] = [];
++  for (const suggestion of suggestions) {
++    const prediction = (suggestion as { placePrediction?: RawPrediction })?.placePrediction;
++    if (!prediction) continue;
++    const placeId = asString(prediction.placeId);
++    if (!BUSINESS_PLACE_ID_REGEX.test(placeId)) continue;
++    // Businesses only: drop streets, cities, postal codes, etc.
++    const types = Array.isArray(prediction.types) ? prediction.types : [];
++    if (!types.includes("establishment")) continue;
++    const mainText = asString(prediction.structuredFormat?.mainText?.text) || asString(prediction.text?.text);
++    if (!mainText) continue;
++    result.push({
++      placeId,
++      mainText,
++      secondaryText: asString(prediction.structuredFormat?.secondaryText?.text),
++    });
++    if (result.length >= MAX_SUGGESTIONS) break;
++  }
++  return result;
++}
++
++export async function autocompletePlaces({
++  input,
++  sessionToken,
++  languageCode,
++}: {
++  input: string;
++  sessionToken?: string;
++  languageCode?: string;
++}): Promise<PlaceSuggestion[]> {
++  const body: Record<string, unknown> = { input, includedRegionCodes: getRegionCodes() };
++  if (sessionToken) body.sessionToken = sessionToken;
++  if (languageCode) body.languageCode = languageCode;
++
++  const data = await callPlaces(
++    `${PLACES_BASE_URL}/places:autocomplete`,
++    {
++      method: "POST",
++      headers: { "Content-Type": "application/json", "X-Goog-Api-Key": getApiKey() },
++      body: JSON.stringify(body),
++    },
++    "autocomplete"
++  );
++  return mapAutocompleteResponse(data);
++}
++
++type RawPlace = {
++  displayName?: { text?: unknown };
++  formattedAddress?: unknown;
++  nationalPhoneNumber?: unknown;
++  internationalPhoneNumber?: unknown;
++  websiteUri?: unknown;
++  googleMapsUri?: unknown;
++  primaryTypeDisplayName?: { text?: unknown };
++};
++
++export function mapDetailsResponse(data: unknown, placeId: string): PlaceDetails | null {
++  const place = data as RawPlace | null;
++  const name = asString(place?.displayName?.text);
++  if (!place || !name) return null;
++
++  const details: PlaceDetails = { placeId, name };
++  const address = asString(place.formattedAddress);
++  if (address) details.address = address;
++  // International format keeps the country code, so `tel:` links and the CRM get a dialable number.
++  const phone = asString(place.internationalPhoneNumber) || asString(place.nationalPhoneNumber);
++  if (phone) details.phone = phone;
++  const website = asString(place.websiteUri);
++  if (website) details.website = website;
++  const mapsUrl = asString(place.googleMapsUri);
++  if (mapsUrl) details.mapsUrl = mapsUrl;
++  const category = asString(place.primaryTypeDisplayName?.text);
++  if (category) details.category = category;
++  return details;
++}
++
++export async function getPlaceDetails({
++  placeId,
++  sessionToken,
++  languageCode,
++}: {
++  placeId: string;
++  sessionToken?: string;
++  languageCode?: string;
++}): Promise<PlaceDetails | null> {
++  const params = new URLSearchParams();
++  if (sessionToken) params.set("sessionToken", sessionToken);
++  if (languageCode) params.set("languageCode", languageCode);
++  const query = params.toString();
++
++  const data = await callPlaces(
++    `${PLACES_BASE_URL}/places/${encodeURIComponent(placeId)}${query ? `?${query}` : ""}`,
++    {
++      method: "GET",
++      headers: { "X-Goog-Api-Key": getApiKey(), "X-Goog-FieldMask": DETAILS_FIELD_MASK },
++    },
++    "details"
++  );
++  return mapDetailsResponse(data, placeId);
++}
+diff --git a/packages/lib/server/places/handlers.test.ts b/packages/lib/server/places/handlers.test.ts
+new file mode 100644
+index 0000000..f46a28a
+--- /dev/null
++++ b/packages/lib/server/places/handlers.test.ts
+@@ -0,0 +1,251 @@
++// @vitest-environment node
++import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
++
++import { HttpError } from "@calcom/lib/http-error";
++
++import { handleAutocompleteRequest, handleDetailsRequest, resetPlacesCachesForTests } from "./handlers";
++import { resetRateLimiterForTests } from "./inMemoryRateLimiter";
++
++vi.mock("@calcom/lib/checkRateLimitAndThrowError", () => ({
++  checkRateLimitAndThrowError: vi.fn().mockResolvedValue({ success: true }),
++}));
++
++vi.mock("@calcom/lib/logger", () => {
++  const subLogger = { error: vi.fn(), warn: vi.fn(), info: vi.fn(), debug: vi.fn() };
++  return { default: { getSubLogger: () => subLogger } };
++});
++
++const PLACE_ID = "ChIJN1t_tDeuEmsRUsoyG83frY4";
++const SESSION_TOKEN = "3f2b8a7e-1c4d-4e5f-9a6b-7c8d9e0f1a2b";
++
++const autocompleteResponse = {
++  suggestions: [
++    {
++      placePrediction: {
++        placeId: PLACE_ID,
++        types: ["plumber", "point_of_interest", "establishment"],
++        text: { text: "Acme Plumbing, 1 Main St, Austin, TX, USA" },
++        structuredFormat: {
++          mainText: { text: "Acme Plumbing" },
++          secondaryText: { text: "1 Main St, Austin, TX, USA" },
++        },
++      },
++    },
++    {
++      placePrediction: {
++        placeId: "ChIJstreet000000000",
++        types: ["route", "geocode"],
++        structuredFormat: { mainText: { text: "Acme Street" } },
++      },
++    },
++    { queryPrediction: { text: { text: "acme near me" } } },
++  ],
++};
++
++const detailsResponse = {
++  id: PLACE_ID,
++  displayName: { text: "Acme Plumbing", languageCode: "en" },
++  formattedAddress: "1 Main St, Austin, TX 78701, USA",
++  nationalPhoneNumber: "(512) 555-0100",
++  internationalPhoneNumber: "+1 512-555-0100",
++  websiteUri: "https://acmeplumbing.example/",
++  googleMapsUri: "https://maps.google.com/?cid=123",
++  primaryTypeDisplayName: { text: "Plumber", languageCode: "en" },
++};
++
++const jsonResponse = (body: unknown, status = 200) =>
++  new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
++
++const params = (query: Record<string, string>) => new URLSearchParams(query);
++
++let fetchMock: ReturnType<typeof vi.fn>;
++
++beforeEach(() => {
++  resetRateLimiterForTests();
++  resetPlacesCachesForTests();
++  vi.stubEnv("GOOGLE_PLACES_API_KEY", "test-places-key");
++  vi.stubEnv("GOOGLE_PLACES_REGION_CODES", "");
++  fetchMock = vi.fn();
++  vi.stubGlobal("fetch", fetchMock);
++});
++
++afterEach(() => {
++  vi.unstubAllEnvs();
++  vi.unstubAllGlobals();
++});
++
++describe("handleAutocompleteRequest", () => {
++  it("returns 503 with enabled:false when no API key is configured", async () => {
++    vi.stubEnv("GOOGLE_PLACES_API_KEY", "");
++    const result = await handleAutocompleteRequest({ searchParams: params({ input: "acme" }), clientKey: "c1" });
++    expect(result.status).toBe(503);
++    expect(result.body).toEqual({ enabled: false });
++    expect(result.headers["Cache-Control"]).toBe("no-store");
++    expect(fetchMock).not.toHaveBeenCalled();
++  });
++
++  it("rejects input shorter than 3 characters", async () => {
++    const result = await handleAutocompleteRequest({ searchParams: params({ input: "ac" }), clientKey: "c2" });
++    expect(result.status).toBe(400);
++    expect(result.body).toMatchObject({ message: "VALIDATION_ERROR" });
++    expect(fetchMock).not.toHaveBeenCalled();
++  });
++
++  it("rejects a malformed session token", async () => {
++    const result = await handleAutocompleteRequest({
++      searchParams: params({ input: "acme", sessionToken: "not-a-uuid" }),
++      clientKey: "c3",
++    });
++    expect(result.status).toBe(400);
++  });
++
++  it("calls Places with region codes and session token, and keeps only establishments", async () => {
++    fetchMock.mockResolvedValueOnce(jsonResponse(autocompleteResponse));
++    const result = await handleAutocompleteRequest({
++      searchParams: params({ input: "acme", sessionToken: SESSION_TOKEN, lang: "en-US" }),
++      clientKey: "c4",
++    });
++
++    expect(result.status).toBe(200);
++    expect(result.headers["Cache-Control"]).toBe("no-store");
++    expect(result.body).toEqual({
++      enabled: true,
++      suggestions: [
++        { placeId: PLACE_ID, mainText: "Acme Plumbing", secondaryText: "1 Main St, Austin, TX, USA" },
++      ],
++    });
++
++    expect(fetchMock).toHaveBeenCalledTimes(1);
++    const [url, init] = fetchMock.mock.calls[0];
++    expect(url).toBe("https://places.googleapis.com/v1/places:autocomplete");
++    expect(init.method).toBe("POST");
++    expect(init.headers["X-Goog-Api-Key"]).toBe("test-places-key");
++    expect(JSON.parse(init.body)).toEqual({
++      input: "acme",
++      includedRegionCodes: ["us", "ca"],
++      sessionToken: SESSION_TOKEN,
++      languageCode: "en-US",
++    });
++  });
++
++  it("honours GOOGLE_PLACES_REGION_CODES", async () => {
++    vi.stubEnv("GOOGLE_PLACES_REGION_CODES", "us, mx ,bad-code");
++    fetchMock.mockResolvedValueOnce(jsonResponse({ suggestions: [] }));
++    await handleAutocompleteRequest({ searchParams: params({ input: "acme" }), clientKey: "c5" });
++    expect(JSON.parse(fetchMock.mock.calls[0][1].body).includedRegionCodes).toEqual(["us", "mx"]);
++  });
++
++  it("serves repeated queries from the cache", async () => {
++    fetchMock.mockResolvedValue(jsonResponse(autocompleteResponse));
++    await handleAutocompleteRequest({ searchParams: params({ input: "Acme  Plumbing" }), clientKey: "c6" });
++    const second = await handleAutocompleteRequest({
++      searchParams: params({ input: "acme plumbing" }),
++      clientKey: "c6",
++    });
++    expect(second.status).toBe(200);
++    expect(fetchMock).toHaveBeenCalledTimes(1);
++  });
++
++  it("rate limits bursts with 429 and Retry-After", async () => {
++    fetchMock.mockResolvedValue(jsonResponse({ suggestions: [] }));
++    for (let i = 0; i < 30; i++) {
++      const ok = await handleAutocompleteRequest({ searchParams: params({ input: "acme" }), clientKey: "c7" });
++      expect(ok.status).toBe(200);
++    }
++    const limited = await handleAutocompleteRequest({ searchParams: params({ input: "acme" }), clientKey: "c7" });
++    expect(limited.status).toBe(429);
++    expect(Number(limited.headers["Retry-After"])).toBeGreaterThan(0);
++
++    // A different client is unaffected
++    const other = await handleAutocompleteRequest({ searchParams: params({ input: "acme" }), clientKey: "c8" });
++    expect(other.status).toBe(200);
++  });
++
++  it("throws a 502 HttpError when Google fails, without leaking its body", async () => {
++    fetchMock.mockResolvedValueOnce(
++      jsonResponse({ error: { status: "PERMISSION_DENIED", message: "key leaked here" } }, 403)
++    );
++    const promise = handleAutocompleteRequest({ searchParams: params({ input: "acme" }), clientKey: "c9" });
++    await expect(promise).rejects.toBeInstanceOf(HttpError);
++    await expect(promise).rejects.toMatchObject({ statusCode: 502, message: "places_upstream_error" });
++  });
++
++  it("throws a 502 HttpError when the request itself fails", async () => {
++    fetchMock.mockRejectedValueOnce(new Error("network down"));
++    await expect(
++      handleAutocompleteRequest({ searchParams: params({ input: "acme" }), clientKey: "c10" })
++    ).rejects.toMatchObject({ statusCode: 502 });
++  });
++});
++
++describe("handleDetailsRequest", () => {
++  it("returns 503 when disabled", async () => {
++    vi.stubEnv("GOOGLE_PLACES_API_KEY", "");
++    const result = await handleDetailsRequest({ placeId: PLACE_ID, searchParams: params({}), clientKey: "d1" });
++    expect(result.status).toBe(503);
++    expect(result.body).toEqual({ enabled: false });
++  });
++
++  it("rejects an invalid place id", async () => {
++    const result = await handleDetailsRequest({
++      placeId: "../../etc/passwd",
++      searchParams: params({}),
++      clientKey: "d2",
++    });
++    expect(result.status).toBe(400);
++    expect(fetchMock).not.toHaveBeenCalled();
++  });
++
++  it("returns the compact place DTO and requests only the needed fields", async () => {
++    fetchMock.mockResolvedValueOnce(jsonResponse(detailsResponse));
++    const result = await handleDetailsRequest({
++      placeId: PLACE_ID,
++      searchParams: params({ sessionToken: SESSION_TOKEN }),
++      clientKey: "d3",
++    });
++
++    expect(result.status).toBe(200);
++    expect(result.body).toEqual({
++      enabled: true,
++      place: {
++        placeId: PLACE_ID,
++        name: "Acme Plumbing",
++        address: "1 Main St, Austin, TX 78701, USA",
++        phone: "+1 512-555-0100",
++        website: "https://acmeplumbing.example/",
++        mapsUrl: "https://maps.google.com/?cid=123",
++        category: "Plumber",
++      },
++    });
++
++    const [url, init] = fetchMock.mock.calls[0];
++    expect(url).toBe(`https://places.googleapis.com/v1/places/${PLACE_ID}?sessionToken=${SESSION_TOKEN}`);
++    expect(init.headers["X-Goog-FieldMask"]).toBe(
++      "id,displayName,formattedAddress,nationalPhoneNumber,internationalPhoneNumber,websiteUri,googleMapsUri,primaryTypeDisplayName"
++    );
++    expect(init.headers["X-Goog-Api-Key"]).toBe("test-places-key");
++  });
++
++  it("caches details by place id", async () => {
++    fetchMock.mockResolvedValue(jsonResponse(detailsResponse));
++    await handleDetailsRequest({ placeId: PLACE_ID, searchParams: params({}), clientKey: "d4" });
++    await handleDetailsRequest({ placeId: PLACE_ID, searchParams: params({}), clientKey: "d4" });
++    expect(fetchMock).toHaveBeenCalledTimes(1);
++  });
++
++  it("returns 404 when Google returns no usable place", async () => {
++    fetchMock.mockResolvedValueOnce(jsonResponse({ id: PLACE_ID }));
++    const result = await handleDetailsRequest({ placeId: PLACE_ID, searchParams: params({}), clientKey: "d5" });
++    expect(result.status).toBe(404);
++  });
++
++  it("uses a tighter burst limit than autocomplete", async () => {
++    fetchMock.mockResolvedValue(jsonResponse(detailsResponse));
++    for (let i = 0; i < 10; i++) {
++      const ok = await handleDetailsRequest({ placeId: PLACE_ID, searchParams: params({}), clientKey: "d6" });
++      expect(ok.status).toBe(200);
++    }
++    const limited = await handleDetailsRequest({ placeId: PLACE_ID, searchParams: params({}), clientKey: "d6" });
++    expect(limited.status).toBe(429);
++  });
++});
+diff --git a/packages/lib/server/places/handlers.ts b/packages/lib/server/places/handlers.ts
+new file mode 100644
+index 0000000..eb17add
+--- /dev/null
++++ b/packages/lib/server/places/handlers.ts
+@@ -0,0 +1,148 @@
++import { z } from "zod";
++
++import { BUSINESS_PLACE_ID_REGEX } from "@calcom/lib/bookings/businessPlace";
++import { checkRateLimitAndThrowError } from "@calcom/lib/checkRateLimitAndThrowError";
++
++import {
++  autocompletePlaces,
++  getPlaceDetails,
++  isPlacesEnabled,
++  type PlaceDetails,
++  type PlaceSuggestion,
++} from "./googlePlacesClient";
++import { consumeToken } from "./inMemoryRateLimiter";
++import { LruCache } from "./lruCache";
++
++/**
++ * Framework-free handlers behind `/api/places/*`. The route files only translate these results into
++ * `NextResponse`s, which keeps everything here unit-testable.
++ */
++export type PlacesHandlerResult = {
++  status: number;
++  body: unknown;
++  headers: Record<string, string>;
++};
++
++const NO_STORE = { "Cache-Control": "no-store" };
++
++const AUTOCOMPLETE_BUCKET = { capacity: 30, refillPerSec: 0.5 };
++const DETAILS_BUCKET = { capacity: 10, refillPerSec: 10 / 60 };
++
++const autocompleteCache = new LruCache<PlaceSuggestion[]>(500, 5 * 60 * 1000);
++const detailsCache = new LruCache<PlaceDetails | null>(500, 10 * 60 * 1000);
++
++const sessionTokenSchema = z.string().uuid().optional();
++
++const autocompleteQuerySchema = z.object({
++  input: z.string().trim().min(3).max(120),
++  sessionToken: sessionTokenSchema,
++  lang: z
++    .string()
++    .max(10)
++    .regex(/^[A-Za-z]{2,3}([_-][A-Za-z0-9]{2,8})*$/)
++    .optional(),
++});
++
++const detailsQuerySchema = z.object({
++  placeId: z.string().regex(BUSINESS_PLACE_ID_REGEX),
++  sessionToken: sessionTokenSchema,
++});
++
++const disabledResult = (): PlacesHandlerResult => ({
++  status: 503,
++  headers: NO_STORE,
++  body: { enabled: false },
++});
++
++const rateLimitedResult = (retryAfterSec: number): PlacesHandlerResult => ({
++  status: 429,
++  headers: { ...NO_STORE, "Retry-After": String(retryAfterSec) },
++  body: { message: "rate_limited" },
++});
++
++const validationErrorResult = (error: z.ZodError): PlacesHandlerResult => ({
++  status: 400,
++  headers: NO_STORE,
++  body: {
++    message: "VALIDATION_ERROR",
++    errors: error.errors.map((err) => ({
++      path: err.path.join("."),
++      errorCode: `error.validation.${err.code}`,
++    })),
++  },
++});
++
++const optionalParam = (searchParams: URLSearchParams, key: string) => searchParams.get(key) || undefined;
++
++export async function handleAutocompleteRequest({
++  searchParams,
++  clientKey,
++}: {
++  searchParams: URLSearchParams;
++  clientKey: string;
++}): Promise<PlacesHandlerResult> {
++  if (!isPlacesEnabled()) return disabledResult();
++
++  // No-op unless UNKEY_ROOT_KEY is configured; the in-memory bucket below is what actually applies here.
++  await checkRateLimitAndThrowError({ rateLimitingType: "common", identifier: `api:places-ac:${clientKey}` });
++  const bucket = consumeToken(`ac:${clientKey}`, AUTOCOMPLETE_BUCKET);
++  if (!bucket.ok) return rateLimitedResult(bucket.retryAfterSec);
++
++  const parsed = autocompleteQuerySchema.safeParse({
++    input: searchParams.get("input") ?? undefined,
++    sessionToken: optionalParam(searchParams, "sessionToken"),
++    lang: optionalParam(searchParams, "lang"),
++  });
++  if (!parsed.success) return validationErrorResult(parsed.error);
++
++  const { input, sessionToken, lang } = parsed.data;
++  const languageCode = lang?.replace("_", "-");
++  const cacheKey = `${(languageCode ?? "").toLowerCase()}|${input.toLowerCase().replace(/\s+/g, " ")}`;
++
++  let suggestions = autocompleteCache.get(cacheKey);
++  if (!suggestions) {
++    suggestions = await autocompletePlaces({ input, sessionToken, languageCode });
++    autocompleteCache.set(cacheKey, suggestions);
++  }
++
++  return { status: 200, headers: NO_STORE, body: { enabled: true, suggestions } };
++}
++
++export async function handleDetailsRequest({
++  placeId,
++  searchParams,
++  clientKey,
++}: {
++  placeId: unknown;
++  searchParams: URLSearchParams;
++  clientKey: string;
++}): Promise<PlacesHandlerResult> {
++  if (!isPlacesEnabled()) return disabledResult();
++
++  await checkRateLimitAndThrowError({
++    rateLimitingType: "common",
++    identifier: `api:places-details:${clientKey}`,
++  });
++  const bucket = consumeToken(`det:${clientKey}`, DETAILS_BUCKET);
++  if (!bucket.ok) return rateLimitedResult(bucket.retryAfterSec);
++
++  const parsed = detailsQuerySchema.safeParse({
++    placeId,
++    sessionToken: optionalParam(searchParams, "sessionToken"),
++  });
++  if (!parsed.success) return validationErrorResult(parsed.error);
++
++  let place = detailsCache.get(parsed.data.placeId);
++  if (place === undefined) {
++    place = await getPlaceDetails({ placeId: parsed.data.placeId, sessionToken: parsed.data.sessionToken });
++    detailsCache.set(parsed.data.placeId, place);
++  }
++
++  if (!place) return { status: 404, headers: NO_STORE, body: { enabled: true, place: null } };
++  return { status: 200, headers: NO_STORE, body: { enabled: true, place } };
++}
++
++export function resetPlacesCachesForTests() {
++  autocompleteCache.clear();
++  detailsCache.clear();
++}
+diff --git a/packages/lib/server/places/inMemoryRateLimiter.ts b/packages/lib/server/places/inMemoryRateLimiter.ts
+new file mode 100644
+index 0000000..8ddfb76
+--- /dev/null
++++ b/packages/lib/server/places/inMemoryRateLimiter.ts
+@@ -0,0 +1,43 @@
++/**
++ * Per-process token bucket. Used because the Unkey limiter is a no-op without UNKEY_ROOT_KEY.
++ * Deliberately in-memory: this deployment runs a single replica.
++ */
++type Bucket = { tokens: number; updatedAt: number };
++
++const MAX_TRACKED_KEYS = 5000;
++
++const buckets = new Map<string, Bucket>();
++
++export type ConsumeResult = { ok: boolean; retryAfterSec: number };
++
++export function consumeToken(
++  key: string,
++  { capacity, refillPerSec }: { capacity: number; refillPerSec: number },
++  now: number = Date.now()
++): ConsumeResult {
++  if (buckets.size > MAX_TRACKED_KEYS) prune(now, capacity, refillPerSec);
++
++  const existing = buckets.get(key);
++  const elapsedSec = existing ? Math.max(0, now - existing.updatedAt) / 1000 : 0;
++  const tokens = existing ? Math.min(capacity, existing.tokens + elapsedSec * refillPerSec) : capacity;
++
++  if (tokens >= 1) {
++    buckets.set(key, { tokens: tokens - 1, updatedAt: now });
++    return { ok: true, retryAfterSec: 0 };
++  }
++
++  buckets.set(key, { tokens, updatedAt: now });
++  return { ok: false, retryAfterSec: Math.max(1, Math.ceil((1 - tokens) / refillPerSec)) };
++}
++
++// Drop buckets that would be full again by now; they carry no state worth keeping.
++function prune(now: number, capacity: number, refillPerSec: number) {
++  for (const [key, bucket] of buckets) {
++    const refilled = bucket.tokens + (Math.max(0, now - bucket.updatedAt) / 1000) * refillPerSec;
++    if (refilled >= capacity) buckets.delete(key);
++  }
++}
++
++export function resetRateLimiterForTests() {
++  buckets.clear();
++}
+diff --git a/packages/lib/server/places/lruCache.ts b/packages/lib/server/places/lruCache.ts
+new file mode 100644
+index 0000000..8f0581f
+--- /dev/null
++++ b/packages/lib/server/places/lruCache.ts
+@@ -0,0 +1,40 @@
++/** Tiny Map-based LRU with a TTL. Map iteration order doubles as recency order. */
++export class LruCache<V> {
++  private readonly entries = new Map<string, { value: V; expiresAt: number }>();
++
++  constructor(
++    private readonly maxEntries: number,
++    private readonly ttlMs: number
++  ) {}
++
++  get(key: string, now: number = Date.now()): V | undefined {
++    const entry = this.entries.get(key);
++    if (!entry) return undefined;
++    if (entry.expiresAt <= now) {
++      this.entries.delete(key);
++      return undefined;
++    }
++    // Refresh recency
++    this.entries.delete(key);
++    this.entries.set(key, entry);
++    return entry.value;
++  }
++
++  set(key: string, value: V, now: number = Date.now()) {
++    this.entries.delete(key);
++    this.entries.set(key, { value, expiresAt: now + this.ttlMs });
++    while (this.entries.size > this.maxEntries) {
++      const oldestKey = this.entries.keys().next().value;
++      if (oldestKey === undefined) break;
++      this.entries.delete(oldestKey);
++    }
++  }
++
++  clear() {
++    this.entries.clear();
++  }
++
++  get size() {
++    return this.entries.size;
++  }
++}
+diff --git a/packages/lib/server/places/placesUtils.test.ts b/packages/lib/server/places/placesUtils.test.ts
+new file mode 100644
+index 0000000..9022f87
+--- /dev/null
++++ b/packages/lib/server/places/placesUtils.test.ts
+@@ -0,0 +1,61 @@
++// @vitest-environment node
++import { beforeEach, describe, expect, it } from "vitest";
++
++import { consumeToken, resetRateLimiterForTests } from "./inMemoryRateLimiter";
++import { LruCache } from "./lruCache";
++
++describe("consumeToken", () => {
++  beforeEach(() => resetRateLimiterForTests());
++
++  it("allows up to capacity, then rejects with a retry hint", () => {
++    const opts = { capacity: 3, refillPerSec: 1 };
++    const now = 1_000_000;
++    expect(consumeToken("k", opts, now).ok).toBe(true);
++    expect(consumeToken("k", opts, now).ok).toBe(true);
++    expect(consumeToken("k", opts, now).ok).toBe(true);
++    const rejected = consumeToken("k", opts, now);
++    expect(rejected.ok).toBe(false);
++    expect(rejected.retryAfterSec).toBe(1);
++  });
++
++  it("refills over time", () => {
++    const opts = { capacity: 1, refillPerSec: 0.5 };
++    expect(consumeToken("k", opts, 0).ok).toBe(true);
++    expect(consumeToken("k", opts, 1000).ok).toBe(false);
++    expect(consumeToken("k", opts, 3000).ok).toBe(true);
++  });
++
++  it("tracks keys independently", () => {
++    const opts = { capacity: 1, refillPerSec: 0.01 };
++    expect(consumeToken("a", opts, 0).ok).toBe(true);
++    expect(consumeToken("a", opts, 0).ok).toBe(false);
++    expect(consumeToken("b", opts, 0).ok).toBe(true);
++  });
++});
++
++describe("LruCache", () => {
++  it("expires entries after the TTL", () => {
++    const cache = new LruCache<string>(10, 1000);
++    cache.set("a", "1", 0);
++    expect(cache.get("a", 999)).toBe("1");
++    expect(cache.get("a", 1000)).toBeUndefined();
++  });
++
++  it("evicts the least recently used entry", () => {
++    const cache = new LruCache<string>(2, 60_000);
++    cache.set("a", "1", 0);
++    cache.set("b", "2", 0);
++    cache.get("a", 1); // a is now most recent
++    cache.set("c", "3", 2);
++    expect(cache.get("b", 3)).toBeUndefined();
++    expect(cache.get("a", 3)).toBe("1");
++    expect(cache.get("c", 3)).toBe("3");
++    expect(cache.size).toBe(2);
++  });
++
++  it("can cache null as a value", () => {
++    const cache = new LruCache<string | null>(2, 60_000);
++    cache.set("missing", null, 0);
++    expect(cache.get("missing", 1)).toBeNull();
++  });
++});
+diff --git a/packages/prisma/zod-utils.ts b/packages/prisma/zod-utils.ts
+index 1690666..bba7f7a 100644
+--- a/packages/prisma/zod-utils.ts
++++ b/packages/prisma/zod-utils.ts
+@@ -986,6 +986,7 @@ export const fieldTypeEnum = z.enum([
+   "radioInput",
+   "boolean",
+   "url",
++  "businessPlace",
+ ]);
+ 
+ export type FieldType = z.infer<typeof fieldTypeEnum>;
+diff --git a/packages/types/environment.d.ts b/packages/types/environment.d.ts
+index 12ecfbb..a8bb943 100644
+--- a/packages/types/environment.d.ts
++++ b/packages/types/environment.d.ts
+@@ -6,6 +6,10 @@ declare namespace NodeJS {
+     readonly GOOGLE_API_CREDENTIALS: string | undefined;
+     /** Google Calendar API key for fetching public holiday calendars */
+     readonly GOOGLE_CALENDAR_API_KEY: string | undefined;
++    /** Server-only key for Places API (New), used by the "Business (Google)" booking question */
++    readonly GOOGLE_PLACES_API_KEY: string | undefined;
++    /** Comma separated ISO 3166-1 alpha-2 codes to restrict business search to. Defaults to "us,ca" */
++    readonly GOOGLE_PLACES_REGION_CODES: string | undefined;
+     /** @deprecated use `NEXT_PUBLIC_WEBAPP_URL` */
+     readonly BASE_URL: string | undefined;
+     /** @deprecated use `NEXT_PUBLIC_WEBAPP_URL` */
+diff --git a/turbo.json b/turbo.json
+index cf7697f..edf8681 100644
+--- a/turbo.json
++++ b/turbo.json
+@@ -79,6 +79,8 @@
+     "GIPHY_API_KEY",
+     "GOOGLE_API_CREDENTIALS",
+     "GOOGLE_CALENDAR_API_KEY",
++    "GOOGLE_PLACES_API_KEY",
++    "GOOGLE_PLACES_REGION_CODES",
+     "GOOGLE_LOGIN_ENABLED",
+     "GOOGLE_WEBHOOK_TOKEN",
+     "GOOGLE_WEBHOOK_URL",
