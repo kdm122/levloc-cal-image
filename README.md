@@ -67,7 +67,7 @@ after the upstream clone, before the `sed` steps:
 
 | Patch | What it does |
 |---|---|
-| `0001-business-place-booking-field.patch` | New **Business (Google)** booking question type (`businessPlace`): Google Places autocomplete in the booker via the server-side proxy `/api/places/*`, structured answer `{ value, name, placeId, address, city, state, phone, website, mapsUrl, category }` (`value` = "Business name - City, ST") shown on the booking page, bookings sheet, emails, calendar descriptions and webhooks. Needs `GOOGLE_PLACES_API_KEY` on the Railway `web` service (runtime only, no rebuild); without it the question degrades to plain text. |
+| `0001-business-place-booking-field.patch` | New **Business (Google)** booking question type (`businessPlace`): Google Maps-style search in the booker (pin icon, name with the typed letters bold, short street address, "Powered by Google") via the server-side proxy `/api/places/*`; the chosen business shows as a name + address card. Structured answer `{ value, name, placeId, address, city, state, phone, website, mapsUrl, category }` (`value` = "Business name, 21 S Main St, City, ST") shown on the booking page, bookings sheet, emails, calendar descriptions and webhooks. Needs `GOOGLE_PLACES_API_KEY` on the Railway `web` service (runtime only, no rebuild); without it the question degrades to plain text. |
 
 **Important:** `next.config.ts` is patched to `ignoreBuildErrors: true`, so
 TypeScript errors in patched code do **not** fail the image build; only syntax and

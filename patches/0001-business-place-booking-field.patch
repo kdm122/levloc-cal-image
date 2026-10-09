@@ -228,10 +228,10 @@ index 5c65073..529c1ac 100644
        renderComponent({ formBuilderProps: mockProps, formDefaultValues: {} });
 diff --git a/apps/web/modules/form-builder/components/BusinessPlaceInput.test.tsx b/apps/web/modules/form-builder/components/BusinessPlaceInput.test.tsx
 new file mode 100644
-index 0000000..ba5944f
+index 0000000..42697eb
 --- /dev/null
 +++ b/apps/web/modules/form-builder/components/BusinessPlaceInput.test.tsx
-@@ -0,0 +1,208 @@
+@@ -0,0 +1,270 @@
 +import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 +import { useState } from "react";
 +import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -255,7 +255,14 @@ index 0000000..ba5944f
 +
 +const autocompleteBody = {
 +  enabled: true,
-+  suggestions: [{ placeId: PLACE_ID, mainText: "Acme Plumbing", secondaryText: "1 Main St, Austin, TX" }],
++  suggestions: [
++    {
++      placeId: PLACE_ID,
++      mainText: "Acme Plumbing",
++      secondaryText: "1 Main St, Austin, TX, USA",
++      mainTextMatches: [{ start: 0, end: 4 }],
++    },
++  ],
 +};
 +
 +const detailsBody = {
@@ -298,7 +305,7 @@ index 0000000..ba5944f
 +  );
 +}
 +
-+const getSearchInput = (container: HTMLElement) => container.querySelector("#business") as HTMLInputElement;
++const getSearchInput = (container: HTMLElement) => container.querySelector("input#business") as HTMLInputElement;
 +
 +const typeInto = (input: HTMLInputElement, text: string) => {
 +  fireEvent.focus(input);
@@ -306,6 +313,14 @@ index 0000000..ba5944f
 +};
 +
 +const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
++
++const existingValue: BusinessPlaceValue = {
++  // Saved before the summary format changed
++  value: "Acme Plumbing - Austin, TX",
++  name: "Acme Plumbing",
++  address: "1 Main St, Austin, TX 78701, USA",
++  placeId: PLACE_ID,
++};
 +
 +beforeEach(() => {
 +  fetchMock = vi.fn();
@@ -337,7 +352,35 @@ index 0000000..ba5944f
 +    expect(url.searchParams.get("sessionToken")).toMatch(UUID_REGEX);
 +  });
 +
-+  it("stores the structured business when a suggestion is chosen", async () => {
++  it("shows suggestions like Google Maps: bold match, short address and Google attribution", async () => {
++    fetchMock.mockResolvedValue(jsonResponse(autocompleteBody));
++    const { container } = render(<Harness onSetValue={vi.fn()} />);
++    typeInto(getSearchInput(container), "acme");
++
++    const row = await screen.findByTestId("business-place-suggestion");
++    expect(row).toHaveTextContent("Acme Plumbing");
++    // ZIP and country dropped
++    expect(screen.getByText("1 Main St, Austin, TX")).toBeInTheDocument();
++    const bold = row.querySelector(".font-semibold");
++    expect(bold?.textContent).toBe("Acme");
++    expect(screen.getByText("Powered by Google")).toBeInTheDocument();
++  });
++
++  it("highlights the typed text when Google sends no match ranges", async () => {
++    fetchMock.mockResolvedValue(
++      jsonResponse({
++        enabled: true,
++        suggestions: [{ placeId: PLACE_ID, mainText: "The Acme Shop", secondaryText: "Austin, TX, USA" }],
++      })
++    );
++    const { container } = render(<Harness onSetValue={vi.fn()} />);
++    typeInto(getSearchInput(container), "acme");
++
++    const row = await screen.findByTestId("business-place-suggestion");
++    expect(row.querySelector(".font-semibold")?.textContent).toBe("Acme");
++  });
++
++  it("stores the structured business when a suggestion is chosen and shows it as a card", async () => {
 +    fetchMock.mockImplementation(async (input: string) =>
 +      input.includes("/api/places/details/") ? jsonResponse(detailsBody) : jsonResponse(autocompleteBody)
 +    );
@@ -345,24 +388,25 @@ index 0000000..ba5944f
 +    const { container } = render(<Harness onSetValue={onSetValue} />);
 +    typeInto(getSearchInput(container), "acme");
 +
-+    const option = await screen.findByText("Acme Plumbing");
-+    fireEvent.click(option);
++    fireEvent.click(await screen.findByTestId("business-place-suggestion"));
 +
 +    // Optimistic value from the prediction...
 +    expect(onSetValue).toHaveBeenCalledWith({
-+      value: "Acme Plumbing - Austin, TX",
++      value: "Acme Plumbing, 1 Main St, Austin, TX",
 +      name: "Acme Plumbing",
-+      address: "1 Main St, Austin, TX",
++      address: "1 Main St, Austin, TX, USA",
 +      city: "Austin",
 +      state: "TX",
 +      placeId: PLACE_ID,
 +    });
-+    expect(await screen.findByText("Acme Plumbing - Austin, TX")).toBeInTheDocument();
++    const card = await screen.findByTestId("business-place-card");
++    expect(card).toHaveTextContent("Acme Plumbing");
++    expect(card).toHaveTextContent("1 Main St, Austin, TX");
 +
 +    // ...then enriched with Place Details, reusing the autocomplete session token.
 +    await waitFor(() =>
 +      expect(onSetValue).toHaveBeenLastCalledWith({
-+        value: "Acme Plumbing - Austin, TX",
++        value: "Acme Plumbing, 1 Main St, Austin, TX",
 +        name: "Acme Plumbing",
 +        placeId: PLACE_ID,
 +        address: "1 Main St, Austin, TX 78701, USA",
@@ -386,8 +430,12 @@ index 0000000..ba5944f
 +    const { container } = render(<Harness onSetValue={onSetValue} />);
 +    typeInto(getSearchInput(container), "Corner Bakery");
 +
-+    fireEvent.click(await screen.findByText("use_as_entered:Corner Bakery"));
++    const freeTextOption = await screen.findByText("use_as_entered:Corner Bakery");
++    // No Google results, so no Google attribution
++    expect(screen.queryByText("Powered by Google")).not.toBeInTheDocument();
++    fireEvent.click(freeTextOption);
 +    expect(onSetValue).toHaveBeenCalledWith({ value: "Corner Bakery", name: "Corner Bakery" });
++    expect(await screen.findByTestId("business-place-card")).toHaveTextContent("Corner Bakery");
 +  });
 +
 +  it("switches to a plain text input when the API is disabled", async () => {
@@ -408,54 +456,72 @@ index 0000000..ba5944f
 +    expect(onSetValue).toHaveBeenLastCalledWith("");
 +  });
 +
-+  it("shows an existing value in the 'Name - City, ST' format and clears it", async () => {
++  it("shows an existing value as a name + short address card and clears it", async () => {
 +    const onSetValue = vi.fn();
-+    const { container } = render(
-+      <Harness
-+        // Saved before the summary format changed
-+        initialValue={{
-+          value: "Acme Plumbing — 1 Main St, Austin, TX 78701, USA",
-+          name: "Acme Plumbing",
-+          address: "1 Main St, Austin, TX 78701, USA",
-+          placeId: PLACE_ID,
-+        }}
-+        onSetValue={onSetValue}
-+      />
-+    );
-+    expect(screen.getByText("Acme Plumbing - Austin, TX")).toBeInTheDocument();
++    const { container } = render(<Harness initialValue={existingValue} onSetValue={onSetValue} />);
 +
-+    const input = getSearchInput(container);
-+    fireEvent.focus(input);
-+    fireEvent.keyDown(input, { key: "Backspace", code: "Backspace", keyCode: 8 });
++    const card = screen.getByTestId("business-place-card");
++    expect(card).toHaveTextContent("Acme Plumbing");
++    expect(card).toHaveTextContent("1 Main St, Austin, TX");
++    expect(card).not.toHaveTextContent("78701");
++
++    fireEvent.click(screen.getByRole("button", { name: "clear" }));
 +    expect(onSetValue).toHaveBeenLastCalledWith("");
++    expect(getSearchInput(container)).toBeInTheDocument();
++    expect(screen.queryByTestId("business-place-card")).not.toBeInTheDocument();
++  });
++
++  it("searches again from the card and goes back to it on blur without changing the answer", async () => {
++    const onSetValue = vi.fn();
++    const { container } = render(<Harness initialValue={existingValue} onSetValue={onSetValue} />);
++
++    fireEvent.click(screen.getByText("Acme Plumbing"));
++    const input = getSearchInput(container);
++    expect(input).toBeInTheDocument();
++
++    fireEvent.change(input, { target: { value: "zz" } });
++    fireEvent.blur(input);
++    expect(await screen.findByTestId("business-place-card")).toHaveTextContent("Acme Plumbing");
++    expect(onSetValue).not.toHaveBeenCalled();
 +  });
 +
 +  it("hydrates a legacy plain string value", () => {
 +    render(<Harness initialValue="Corner Bakery" onSetValue={vi.fn()} />);
-+    expect(screen.getByText("Corner Bakery")).toBeInTheDocument();
++    expect(screen.getByTestId("business-place-card")).toHaveTextContent("Corner Bakery");
 +  });
 +
 +  it("is disabled when read only", () => {
 +    const { container } = render(<Harness onSetValue={vi.fn()} readOnly />);
 +    expect(getSearchInput(container)).toBeDisabled();
 +  });
++
++  it("shows a read-only card without a clear button", () => {
++    render(<Harness initialValue={existingValue} onSetValue={vi.fn()} readOnly />);
++    expect(screen.getByTestId("business-place-card")).toHaveTextContent("Acme Plumbing");
++    expect(screen.queryByRole("button", { name: "clear" })).not.toBeInTheDocument();
++    expect(screen.getByRole("button", { name: /Acme Plumbing/ })).toBeDisabled();
++  });
 +});
 diff --git a/apps/web/modules/form-builder/components/BusinessPlaceInput.tsx b/apps/web/modules/form-builder/components/BusinessPlaceInput.tsx
 new file mode 100644
-index 0000000..b3c7fa7
+index 0000000..0b6a5b0
 --- /dev/null
 +++ b/apps/web/modules/form-builder/components/BusinessPlaceInput.tsx
-@@ -0,0 +1,330 @@
+@@ -0,0 +1,483 @@
 +import { useEffect, useMemo, useRef, useState } from "react";
-+import type { FormatOptionLabelMeta, InputActionMeta, SingleValue } from "react-select";
++import type { GroupBase, InputActionMeta, MenuProps, OptionProps, SingleValue } from "react-select";
++import { components as reactSelectComponents } from "react-select";
 +
 +import {
 +  type BusinessPlaceValue,
++  formatCityState,
++  formatShortAddress,
 +  isBusinessPlaceValue,
 +  normalizeBusinessPlace,
 +} from "@calcom/lib/bookings/businessPlace";
 +import { useDebounce } from "@calcom/lib/hooks/useDebounce";
 +import { useLocale } from "@calcom/lib/hooks/useLocale";
++import classNames from "@calcom/ui/classNames";
 +import { Input, Select } from "@calcom/ui/components/form";
 +import { Icon } from "@calcom/ui/components/icon";
 +
@@ -469,12 +535,18 @@ index 0000000..b3c7fa7
 +  disabled?: boolean;
 +};
 +
-+type Suggestion = { placeId: string; mainText: string; secondaryText: string };
++type MatchRange = { start: number; end: number };
++
++type Suggestion = {
++  placeId: string;
++  mainText: string;
++  secondaryText: string;
++  mainTextMatches?: MatchRange[];
++};
 +
 +type Option =
-+  | { kind: "prediction"; value: string; label: string; suggestion: Suggestion }
-+  | { kind: "freeText"; value: string; label: string; text: string }
-+  | { kind: "selected"; value: string; label: string };
++  | { kind: "prediction"; value: string; label: string; suggestion: Suggestion; query: string }
++  | { kind: "freeText"; value: string; label: string; text: string };
 +
 +const MIN_QUERY_LENGTH = 3;
 +const DEBOUNCE_MS = 300;
@@ -492,7 +564,7 @@ index 0000000..b3c7fa7
 +}
 +
 +function toSelected(value: BusinessPlaceInputProps["value"]): BusinessPlaceValue | null {
-+  // Re-normalise so answers saved with an older summary format still display as "Name - City, ST"
++  // Re-normalise so answers saved with an older summary format display consistently
 +  if (isBusinessPlaceValue(value)) return normalizeBusinessPlace(value) || null;
 +  if (typeof value === "string" && value.trim()) return { value: value.trim(), name: value.trim() };
 +  return null;
@@ -502,10 +574,117 @@ index 0000000..b3c7fa7
 +  return normalizeBusinessPlace({ value: text, name: text });
 +}
 +
++/** Sorted, non-overlapping ranges inside `text`; falls back to the typed query when Google sent none. */
++function getMatchRanges(text: string, ranges: MatchRange[] | undefined, query: string): MatchRange[] {
++  let candidates = Array.isArray(ranges) ? ranges : [];
++  if (!candidates.length && query) {
++    const index = text.toLowerCase().indexOf(query.toLowerCase());
++    if (index >= 0) candidates = [{ start: index, end: index + query.length }];
++  }
++  const sorted = candidates
++    .filter(
++      (range) =>
++        Number.isInteger(range?.start) &&
++        Number.isInteger(range?.end) &&
++        range.start >= 0 &&
++        range.end > range.start &&
++        range.end <= text.length
++    )
++    .sort((a, b) => a.start - b.start);
++  const result: MatchRange[] = [];
++  for (const range of sorted) {
++    const last = result[result.length - 1];
++    if (last && range.start <= last.end) {
++      last.end = Math.max(last.end, range.end);
++    } else {
++      result.push({ ...range });
++    }
++  }
++  return result;
++}
++
++function HighlightedText({ text, ranges, query }: { text: string; ranges?: MatchRange[]; query: string }) {
++  const matches = getMatchRanges(text, ranges, query);
++  if (!matches.length) return <>{text}</>;
++  const parts: JSX.Element[] = [];
++  let cursor = 0;
++  matches.forEach((range, index) => {
++    if (range.start > cursor) parts.push(<span key={`t${index}`}>{text.slice(cursor, range.start)}</span>);
++    parts.push(
++      <span key={`m${index}`} className="text-emphasis font-semibold">
++        {text.slice(range.start, range.end)}
++      </span>
++    );
++    cursor = range.end;
++  });
++  if (cursor < text.length) parts.push(<span key="rest">{text.slice(cursor)}</span>);
++  return <>{parts}</>;
++}
++
++// Defined at module level so react-select doesn't remount them on every render.
++// Cal's shared Option renders only the plain label, so we render our own rows.
++function PlaceOption(props: OptionProps<Option, false, GroupBase<Option>>) {
++  const option = props.data;
++  return (
++    <reactSelectComponents.Option {...props}>
++      {option.kind === "prediction" ? (
++        <div className="flex w-full min-w-0 items-start gap-3" data-testid="business-place-suggestion">
++          <Icon name="map-pin" className="text-subtle mt-0.5 h-4 w-4 shrink-0" />
++          <div className="flex min-w-0 flex-1 flex-col">
++            <span className="text-default truncate text-sm">
++              <HighlightedText
++                text={option.suggestion.mainText}
++                ranges={option.suggestion.mainTextMatches}
++                query={option.query}
++              />
++            </span>
++            {formatShortAddress(option.suggestion.secondaryText) ? (
++              <span className="text-subtle truncate text-xs">
++                {formatShortAddress(option.suggestion.secondaryText)}
++              </span>
++            ) : null}
++          </div>
++        </div>
++      ) : (
++        <div className="flex w-full min-w-0 items-center gap-3">
++          <Icon name="pencil" className="text-subtle h-4 w-4 shrink-0" />
++          <span className="text-default truncate text-sm italic">{option.label}</span>
++        </div>
++      )}
++    </reactSelectComponents.Option>
++  );
++}
++
++function PlacesMenu(props: MenuProps<Option, false, GroupBase<Option>>) {
++  const hasPredictions = props.options.some(
++    (option) => (option as Option | undefined)?.kind === "prediction"
++  );
++  return (
++    <reactSelectComponents.Menu {...props}>
++      {props.children}
++      {hasPredictions ? (
++        <div
++          className="text-subtle flex justify-end px-3 pb-1 pt-2 text-[11px]"
++          // Keep focus in the search box when the footer is clicked
++          onMouseDown={(e) => e.preventDefault()}>
++          Powered by Google
++        </div>
++      ) : null}
++    </reactSelectComponents.Menu>
++  );
++}
++
++const SELECT_COMPONENTS = {
++  DropdownIndicator: null,
++  IndicatorSeparator: null,
++  Option: PlaceOption,
++  Menu: PlacesMenu,
++};
++
 +/**
 + * Booker input for the `businessPlace` booking question. Searches Google Places (via our own
-+ * `/api/places/*` proxy) and stores the chosen listing as a structured object. Falls back to a plain
-+ * text input when the proxy is disabled or unreachable.
++ * `/api/places/*` proxy) like Google Maps does (name plus partial street address) and shows the chosen
++ * listing as a card. Falls back to a plain text input when the proxy is disabled or unreachable.
 + */
 +export function BusinessPlaceInput({
 +  id,
@@ -526,6 +705,9 @@ index 0000000..b3c7fa7
 +  const [fallback, setFallback] = useState(false);
 +  const [fallbackText, setFallbackText] = useState(selected?.value ?? "");
 +  const [focusFallback, setFocusFallback] = useState(false);
++  // Searching again while a business is already chosen (the card is hidden meanwhile)
++  const [isEditing, setIsEditing] = useState(false);
++  const [focusSearch, setFocusSearch] = useState(false);
 +
 +  const selectedRef = useRef(selected);
 +  selectedRef.current = selected;
@@ -557,6 +739,7 @@ index 0000000..b3c7fa7
 +      setValueRef.current(freeTextValue(typed));
 +    }
 +    setFocusFallback(!!typed);
++    setIsEditing(false);
 +    setFallback(true);
 +  };
 +
@@ -621,14 +804,14 @@ index 0000000..b3c7fa7
 +        const placeName = typeof place.name === "string" && place.name ? place.name : suggestion.mainText;
 +        const address =
 +          typeof place.address === "string" && place.address ? place.address : suggestion.secondaryText;
-+        // The normaliser builds the "Name - City, ST" summary from city/state (or the address)
++        // The normaliser builds the "Name, street, City, ST" summary from the address
 +        const full = normalizeBusinessPlace({
 +          ...place,
 +          placeId: suggestion.placeId,
 +          name: placeName,
 +          address,
 +        });
-+        if (full) setValue(full);
++        if (full) setValueRef.current(full);
 +      })
 +      .catch(() => {
 +        // Keep the optimistic value from the prediction.
@@ -636,13 +819,14 @@ index 0000000..b3c7fa7
 +  };
 +
 +  const options = useMemo<Option[]>(() => {
++    const typed = inputValue.trim();
 +    const predictionOptions: Option[] = suggestions.map((suggestion) => ({
 +      kind: "prediction",
 +      value: suggestion.placeId,
 +      label: suggestion.mainText,
 +      suggestion,
++      query: typed,
 +    }));
-+    const typed = inputValue.trim();
 +    if (typed) {
 +      predictionOptions.push({
 +        kind: "freeText",
@@ -656,6 +840,20 @@ index 0000000..b3c7fa7
 +  }, [suggestions, inputValue, t]);
 +
 +  const isDisabled = !!(readOnly || disabled);
++
++  const resetSearch = () => {
++    setSuggestions([]);
++    updateInput("");
++  };
++
++  const clearSelection = () => {
++    latestPlaceIdRef.current = null;
++    resetSearch();
++    sessionTokenRef.current = newPlacesSessionToken();
++    setIsEditing(false);
++    setFocusSearch(true);
++    setValue("");
++  };
 +
 +  if (fallback) {
 +    return (
@@ -684,19 +882,52 @@ index 0000000..b3c7fa7
 +    );
 +  }
 +
-+  const selectedOption: Option | null = selected
-+    ? { kind: "selected", value: "__selected__", label: selected.value }
-+    : null;
++  if (selected && !isEditing) {
++    const secondaryLine = formatShortAddress(selected.address) || formatCityState(selected.city, selected.state);
++    return (
++      <div
++        data-testid="business-place-card"
++        className={classNames(
++          "border-default bg-default flex items-start gap-3 rounded-[10px] border px-3 py-2",
++          isDisabled && "bg-subtle"
++        )}>
++        <Icon name="map-pin" className="text-subtle mt-0.5 h-4 w-4 shrink-0" />
++        <button
++          id={id}
++          type="button"
++          disabled={isDisabled}
++          title={isDisabled ? undefined : t("edit")}
++          onClick={() => {
++            setFocusSearch(true);
++            setIsEditing(true);
++          }}
++          className="flex min-w-0 flex-1 flex-col text-left focus:outline-none disabled:cursor-default">
++          <span className="text-emphasis truncate text-sm font-semibold">{selected.name}</span>
++          {secondaryLine ? <span className="text-subtle truncate text-xs">{secondaryLine}</span> : null}
++        </button>
++        {!isDisabled ? (
++          <button
++            type="button"
++            aria-label={t("clear")}
++            title={t("clear")}
++            onClick={clearSelection}
++            className="text-subtle hover:text-emphasis hover:bg-subtle -mr-1 shrink-0 rounded-md p-1">
++            <Icon name="x" className="h-4 w-4" />
++          </button>
++        ) : null}
++      </div>
++    );
++  }
 +
 +  return (
 +    <Select<Option>
 +      inputId={id}
 +      placeholder={placeholder || t("type_to_search_business")}
 +      isDisabled={isDisabled}
-+      isClearable
 +      isSearchable
 +      isLoading={isLoading}
-+      value={selectedOption}
++      autoFocus={focusSearch}
++      value={null}
 +      options={options}
 +      inputValue={inputValue}
 +      filterOption={() => true}
@@ -704,25 +935,15 @@ index 0000000..b3c7fa7
 +      openMenuOnFocus={false}
 +      blurInputOnSelect
 +      menuPlacement="auto"
-+      components={{ DropdownIndicator: null, IndicatorSeparator: null }}
++      components={SELECT_COMPONENTS}
 +      noOptionsMessage={() =>
 +        inputValue.trim().length < MIN_QUERY_LENGTH ? t("type_to_search_business") : t("no_businesses_found")
 +      }
-+      formatOptionLabel={(option: Option, meta: FormatOptionLabelMeta<Option>) => {
-+        if (meta.context === "value") {
-+          return <span className="truncate">{option.label}</span>;
++      onKeyDown={(e) => {
++        // Escape with an empty search box goes back to the chosen business
++        if (e.key === "Escape" && isEditing && !inputValueRef.current) {
++          setIsEditing(false);
 +        }
-+        if (option.kind === "prediction") {
-+          return (
-+            <div className="flex min-w-0 flex-col">
-+              <span className="text-emphasis truncate">{option.suggestion.mainText}</span>
-+              {option.suggestion.secondaryText ? (
-+                <span className="text-subtle truncate text-xs">{option.suggestion.secondaryText}</span>
-+              ) : null}
-+            </div>
-+          );
-+        }
-+        return <span className="text-default italic">{option.label}</span>;
 +      }}
 +      onInputChange={(newValue: string, meta: InputActionMeta) => {
 +        if (meta.action === "input-change") {
@@ -732,44 +953,38 @@ index 0000000..b3c7fa7
 +        if (meta.action === "input-blur") {
 +          const typed = inputValueRef.current.trim();
 +          // Don't lose a typed answer on tab-out, but never overwrite an existing selection.
-+          if (typed && !selected) {
++          if (typed && !selectedRef.current) {
 +            latestPlaceIdRef.current = null;
 +            setValue(freeTextValue(typed));
 +          }
-+          updateInput("");
++          resetSearch();
++          setIsEditing(false);
++          setFocusSearch(false);
 +        }
 +      }}
 +      onChange={(option: SingleValue<Option>) => {
-+        if (!option) {
-+          latestPlaceIdRef.current = null;
-+          setSuggestions([]);
-+          updateInput("");
-+          sessionTokenRef.current = newPlacesSessionToken();
-+          setValue("");
-+          return;
-+        }
++        if (!option) return;
++        setIsEditing(false);
++        setFocusSearch(false);
 +        if (option.kind === "freeText") {
 +          latestPlaceIdRef.current = null;
-+          updateInput("");
++          resetSearch();
 +          setValue(freeTextValue(option.text));
 +          return;
 +        }
-+        if (option.kind === "prediction") {
-+          const { suggestion } = option;
-+          latestPlaceIdRef.current = suggestion.placeId;
-+          updateInput("");
-+          setSuggestions([]);
-+          const optimistic = normalizeBusinessPlace({
-+            name: suggestion.mainText,
-+            address: suggestion.secondaryText,
-+            placeId: suggestion.placeId,
-+          });
-+          if (optimistic) setValue(optimistic);
-+          // The details call closes the billing session; start a fresh one for any later search.
-+          const sessionToken = sessionTokenRef.current;
-+          sessionTokenRef.current = newPlacesSessionToken();
-+          fetchDetails(suggestion, sessionToken);
-+        }
++        const { suggestion } = option;
++        latestPlaceIdRef.current = suggestion.placeId;
++        resetSearch();
++        const optimistic = normalizeBusinessPlace({
++          name: suggestion.mainText,
++          address: suggestion.secondaryText,
++          placeId: suggestion.placeId,
++        });
++        if (optimistic) setValue(optimistic);
++        // The details call closes the billing session; start a fresh one for any later search.
++        const sessionToken = sessionTokenRef.current;
++        sessionTokenRef.current = newPlacesSessionToken();
++        fetchDetails(suggestion, sessionToken);
 +      }}
 +    />
 +  );
@@ -873,7 +1088,7 @@ index 0934b6f..f812cb8 100644
      return (
        <WithLabel field={field} htmlFor={field.name} readOnly={readOnly} noLabel={noLabel}>
 diff --git a/packages/features/bookings/lib/getBookingResponsesSchema.test.ts b/packages/features/bookings/lib/getBookingResponsesSchema.test.ts
-index 2f16bbf..7af4500 100644
+index 2f16bbf..38e81c1 100644
 --- a/packages/features/bookings/lib/getBookingResponsesSchema.test.ts
 +++ b/packages/features/bookings/lib/getBookingResponsesSchema.test.ts
 @@ -2521,3 +2521,215 @@ describe("getBookingResponsesPartialSchema - Prefill validation", () => {
@@ -913,8 +1128,8 @@ index 2f16bbf..7af4500 100644
 +      email: "test@test.com",
 +      name: "test",
 +      business: {
-+        // Google listings always get the server-built "Name - City, ST" summary
-+        value: "Acme Plumbing - Austin, TX",
++        // Google listings always get the server-built "Name, street, City, ST" summary
++        value: "Acme Plumbing, 1 Main St, Austin, TX",
 +        name: "Acme Plumbing",
 +        placeId: PLACE_ID,
 +        address: "1 Main St, Austin, TX 78701, USA",
@@ -1066,7 +1281,7 @@ index 2f16bbf..7af4500 100644
 +      expect(parsedResponses).toEqual(
 +        expect.objectContaining({
 +          business: {
-+            value: "Acme - Austin, TX",
++            value: "Acme, 1 Main St, Austin, TX",
 +            name: "Acme",
 +            address: "1 Main St, Austin, TX 78701, USA",
 +            city: "Austin",
@@ -1253,16 +1468,17 @@ index 1d14645..6ed1f78 100644
  }
 diff --git a/packages/lib/bookings/businessPlace.test.ts b/packages/lib/bookings/businessPlace.test.ts
 new file mode 100644
-index 0000000..69b298f
+index 0000000..cef740f
 --- /dev/null
 +++ b/packages/lib/bookings/businessPlace.test.ts
-@@ -0,0 +1,276 @@
+@@ -0,0 +1,300 @@
 +import { describe, expect, it } from "vitest";
 +
 +import {
 +  buildBusinessPlaceSummary,
 +  deriveCityState,
 +  formatBusinessPlaceText,
++  formatShortAddress,
 +  getBusinessPlaceLines,
 +  isBusinessPlaceValue,
 +  normalizeBusinessPlace,
@@ -1327,22 +1543,39 @@ index 0000000..69b298f
 +  });
 +});
 +
++describe("formatShortAddress", () => {
++  it("drops the ZIP code and country like Google Maps", () => {
++    expect(formatShortAddress("21 S Evergreen Ave, Arlington Heights, IL 60005, USA")).toBe(
++      "21 S Evergreen Ave, Arlington Heights, IL"
++    );
++    expect(formatShortAddress("South Evergreen Avenue, Arlington Heights, IL, USA")).toBe(
++      "South Evergreen Avenue, Arlington Heights, IL"
++    );
++    expect(formatShortAddress("123 Queen St W, Toronto, ON M5H 2M9, Canada")).toBe("123 Queen St W, Toronto, ON");
++  });
++
++  it("leaves other addresses alone", () => {
++    expect(formatShortAddress("1 Main St")).toBe("1 Main St");
++    expect(formatShortAddress("10 Downing St, London SW1A 2AA, UK")).toBe("10 Downing St, London SW1A 2AA, UK");
++    expect(formatShortAddress(undefined)).toBe("");
++  });
++});
++
 +describe("buildBusinessPlaceSummary", () => {
-+  it("formats 'Name - City, ST'", () => {
++  it("formats 'Name, street, City, ST'", () => {
++    expect(
++      buildBusinessPlaceSummary("Leverage Local", { address: "21 S Evergreen Ave, Arlington Heights, IL 60005, USA" })
++    ).toBe("Leverage Local, 21 S Evergreen Ave, Arlington Heights, IL");
++  });
++
++  it("falls back to 'Name, City, ST' without an address", () => {
 +    expect(buildBusinessPlaceSummary("Leverage Local", { city: "Arlington Heights", state: "IL" })).toBe(
-+      "Leverage Local - Arlington Heights, IL"
++      "Leverage Local, Arlington Heights, IL"
 +    );
 +  });
 +
-+  it("derives city and state from the address when they are missing", () => {
-+    expect(
-+      buildBusinessPlaceSummary("Leverage Local", { address: "21 S Evergreen Ave, Arlington Heights, IL 60005, USA" })
-+    ).toBe("Leverage Local - Arlington Heights, IL");
-+  });
-+
-+  it("returns just the name without a city or state", () => {
++  it("returns just the name without a location", () => {
 +    expect(buildBusinessPlaceSummary(" Acme ")).toBe("Acme");
-+    expect(buildBusinessPlaceSummary("Acme", { address: "1 Main St" })).toBe("Acme");
 +  });
 +});
 +
@@ -1360,7 +1593,7 @@ index 0000000..69b298f
 +        nested: { evil: true },
 +      })
 +    ).toEqual({
-+      value: "Acme - Austin, TX",
++      value: "Acme, 1 Main St, Austin, TX",
 +      name: "Acme",
 +      placeId: PLACE_ID,
 +      address: "1 Main St, Austin, TX 78701, USA",
@@ -1373,7 +1606,7 @@ index 0000000..69b298f
 +  it("rebuilds the summary for Google listings whatever the client sent", () => {
 +    expect(
 +      normalizeBusinessPlace({ value: "anything", name: "Acme", placeId: PLACE_ID, city: "Austin", state: "TX" })
-+    ).toMatchObject({ value: "Acme - Austin, TX", city: "Austin", state: "TX" });
++    ).toMatchObject({ value: "Acme, Austin, TX", city: "Austin", state: "TX" });
 +  });
 +
 +  it("keeps the typed value for free text", () => {
@@ -1398,14 +1631,14 @@ index 0000000..69b298f
 +
 +  it("builds the value summary from name and address", () => {
 +    expect(normalizeBusinessPlace({ name: "Acme", address: "1 Main St, Austin, TX 78701, USA" })).toEqual({
-+      value: "Acme - Austin, TX",
++      value: "Acme, 1 Main St, Austin, TX",
 +      name: "Acme",
 +      address: "1 Main St, Austin, TX 78701, USA",
 +      city: "Austin",
 +      state: "TX",
 +    });
 +    expect(normalizeBusinessPlace({ name: "Acme", address: "1 Main St" })).toEqual({
-+      value: "Acme",
++      value: "Acme, 1 Main St",
 +      name: "Acme",
 +      address: "1 Main St",
 +    });
@@ -1496,6 +1729,12 @@ index 0000000..69b298f
 +    );
 +  });
 +
++  it("shortens the address", () => {
++    expect(formatBusinessPlaceText({ value: "x", name: "Acme", address: "1 Main St, Austin, TX 78701, USA" })).toBe(
++      "Acme, 1 Main St, Austin, TX"
++    );
++  });
++
 +  it("returns just the name for free text", () => {
 +    expect(formatBusinessPlaceText({ value: "Acme", name: "Acme" }, { multiline: true })).toBe("Acme");
 +  });
@@ -1535,16 +1774,16 @@ index 0000000..69b298f
 +});
 diff --git a/packages/lib/bookings/businessPlace.ts b/packages/lib/bookings/businessPlace.ts
 new file mode 100644
-index 0000000..5c1337e
+index 0000000..923444b
 --- /dev/null
 +++ b/packages/lib/bookings/businessPlace.ts
-@@ -0,0 +1,236 @@
+@@ -0,0 +1,255 @@
 +/**
 + * Shared, framework-free helpers for the `businessPlace` booking question type.
 + *
 + * A `businessPlace` response is either `""` (nothing entered) or a flat object of strings.
-+ * `value` is always a human readable summary ("Business name - City, ST") so code that unwraps
-+ * `.value` keeps working. Absence of `placeId` means the booker typed the business name themselves.
++ * `value` is always a human readable summary ("Business name, 21 S Main St, City, ST") so code that
++ * unwraps `.value` keeps working. Absence of `placeId` means the booker typed the business name.
 + */
 +
 +export type BusinessPlaceValue = {
@@ -1590,7 +1829,7 @@ index 0000000..5c1337e
 +
 +export const BUSINESS_PLACE_ID_REGEX = /^[A-Za-z0-9_-]{8,512}$/;
 +
-+const SUMMARY_SEPARATOR = " - ";
++const SUMMARY_SEPARATOR = ", ";
 +
 +const COUNTRY_NAME_REGEX = /^(usa|us|u\.s\.a\.|united states|united states of america|canada|ca)$/i;
 +
@@ -1628,19 +1867,36 @@ index 0000000..5c1337e
 +  return [city?.trim(), state?.trim()].filter(Boolean).join(", ");
 +}
 +
-+/** "Business name - City, ST", or just the name when no city/state is known. */
++/**
++ * The address as people read it on Google Maps: country and ZIP/postal code dropped.
++ * "21 S Evergreen Ave, Arlington Heights, IL 60005, USA" -> "21 S Evergreen Ave, Arlington Heights, IL"
++ */
++export function formatShortAddress(address?: string): string {
++  if (!address) return "";
++  const parts = address
++    .split(",")
++    .map((part) => part.trim())
++    .filter(Boolean);
++  if (parts.length > 1 && COUNTRY_NAME_REGEX.test(parts[parts.length - 1])) parts.pop();
++  if (parts.length) {
++    const last = parts[parts.length - 1];
++    const stateWithPostalCode = last.match(/^([A-Za-z]{2})\s+[A-Za-z0-9][A-Za-z0-9 -]*$/);
++    if (stateWithPostalCode && /\d/.test(last)) parts[parts.length - 1] = stateWithPostalCode[1].toUpperCase();
++  }
++  return parts.join(", ");
++}
++
++/**
++ * "Business name, 21 S Evergreen Ave, Arlington Heights, IL" (falls back to "Name, City, ST", then the
++ * name alone).
++ */
 +export function buildBusinessPlaceSummary(
 +  name: string,
 +  location?: { city?: string; state?: string; address?: string }
 +): string {
 +  const trimmedName = name.trim();
-+  let city = location?.city;
-+  let state = location?.state;
-+  if (!city && !state && location?.address) {
-+    ({ city, state } = deriveCityState(location.address));
-+  }
-+  const cityState = formatCityState(city, state);
-+  return cityState ? `${trimmedName}${SUMMARY_SEPARATOR}${cityState}` : trimmedName;
++  const where = formatShortAddress(location?.address) || formatCityState(location?.city, location?.state);
++  return where ? `${trimmedName}${SUMMARY_SEPARATOR}${where}` : trimmedName;
 +}
 +
 +function parseHttpUrl(raw: string): URL | null {
@@ -1718,7 +1974,7 @@ index 0000000..5c1337e
 +
 +  // Google listings always get a server-built summary so the format is consistent whatever the
 +  // client sent; free-text answers keep what the booker typed.
-+  const summary = buildBusinessPlaceSummary(name, { city: out.city, state: out.state });
++  const summary = buildBusinessPlaceSummary(name, { address: out.address, city: out.city, state: out.state });
 +  const result: BusinessPlaceValue = {
 +    value: (out.placeId ? summary : out.value || summary).slice(0, MAX_LENGTHS.value),
 +    name,
@@ -1752,7 +2008,8 @@ index 0000000..5c1337e
 +  const v = normalizeBusinessPlace(input);
 +  if (!v) return [];
 +  const lines: BusinessPlaceLine[] = [{ kind: "name", text: v.name }];
-+  if (v.address) lines.push({ kind: "address", text: v.address });
++  const shortAddress = formatShortAddress(v.address);
++  if (shortAddress) lines.push({ kind: "address", text: shortAddress });
 +  if (v.category) lines.push({ kind: "category", text: v.category });
 +  if (v.phone) {
 +    const dialable = v.phone.replace(/[^\d+]/g, "");
@@ -1770,10 +2027,11 @@ index 0000000..5c1337e
 +export function formatBusinessPlaceText(input: BusinessPlaceValue, opts?: { multiline?: boolean }): string {
 +  const v = normalizeBusinessPlace(input);
 +  if (!v) return "";
++  const shortAddress = formatShortAddress(v.address);
 +  if (!opts?.multiline) {
-+    return [v.name, v.address, v.phone, v.website].filter(Boolean).join(", ");
++    return [v.name, shortAddress, v.phone, v.website].filter(Boolean).join(", ");
 +  }
-+  return [v.name, v.address, v.category, v.phone, v.website, v.mapsUrl].filter(Boolean).join("\n");
++  return [v.name, shortAddress, v.category, v.phone, v.website, v.mapsUrl].filter(Boolean).join("\n");
 +}
 diff --git a/packages/lib/bookings/getLabelValueMapFromResponses.ts b/packages/lib/bookings/getLabelValueMapFromResponses.ts
 index b072a0e..b68548f 100644
@@ -1802,10 +2060,10 @@ index b072a0e..b68548f 100644
      labelValueMap = customInputs as Record<string, string | string[]>;
 diff --git a/packages/lib/server/places/googlePlacesClient.ts b/packages/lib/server/places/googlePlacesClient.ts
 new file mode 100644
-index 0000000..1e2b047
+index 0000000..fa685e6
 --- /dev/null
 +++ b/packages/lib/server/places/googlePlacesClient.ts
-@@ -0,0 +1,237 @@
+@@ -0,0 +1,277 @@
 +import { BUSINESS_PLACE_ID_REGEX, deriveCityState } from "@calcom/lib/bookings/businessPlace";
 +import { HttpError } from "@calcom/lib/http-error";
 +import logger from "@calcom/lib/logger";
@@ -1828,7 +2086,13 @@ index 0000000..1e2b047
 +  "primaryTypeDisplayName",
 +].join(",");
 +
-+export type PlaceSuggestion = { placeId: string; mainText: string; secondaryText: string };
++export type PlaceSuggestion = {
++  placeId: string;
++  mainText: string;
++  secondaryText: string;
++  /** Ranges of `mainText` that matched the typed input, for bolding like Google Maps */
++  mainTextMatches?: Array<{ start: number; end: number }>;
++};
 +
 +export type PlaceDetails = {
 +  placeId: string;
@@ -1898,8 +2162,34 @@ index 0000000..1e2b047
 +  placeId?: unknown;
 +  types?: unknown;
 +  text?: { text?: unknown };
-+  structuredFormat?: { mainText?: { text?: unknown }; secondaryText?: { text?: unknown } };
++  structuredFormat?: {
++    mainText?: { text?: unknown; matches?: unknown };
++    secondaryText?: { text?: unknown };
++  };
 +};
++
++function mapMatches(matches: unknown, textLength: number): Array<{ start: number; end: number }> {
++  if (!Array.isArray(matches)) return [];
++  const ranges: Array<{ start: number; end: number }> = [];
++  for (const match of matches) {
++    if (typeof match !== "object" || match === null) continue;
++    // Protobuf omits startOffset when it is 0
++    const start = (match as { startOffset?: unknown }).startOffset ?? 0;
++    const end = (match as { endOffset?: unknown }).endOffset;
++    if (
++      typeof start === "number" &&
++      typeof end === "number" &&
++      Number.isInteger(start) &&
++      Number.isInteger(end) &&
++      start >= 0 &&
++      end > start &&
++      end <= textLength
++    ) {
++      ranges.push({ start, end });
++    }
++  }
++  return ranges;
++}
 +
 +export function mapAutocompleteResponse(data: unknown): PlaceSuggestion[] {
 +  const suggestions = (data as { suggestions?: unknown })?.suggestions;
@@ -1914,13 +2204,21 @@ index 0000000..1e2b047
 +    // Businesses only: drop streets, cities, postal codes, etc.
 +    const types = Array.isArray(prediction.types) ? prediction.types : [];
 +    if (!types.includes("establishment")) continue;
-+    const mainText = asString(prediction.structuredFormat?.mainText?.text) || asString(prediction.text?.text);
++    const structuredMainText = asString(prediction.structuredFormat?.mainText?.text);
++    const mainText = structuredMainText || asString(prediction.text?.text);
 +    if (!mainText) continue;
-+    result.push({
++    const suggestionEntry: PlaceSuggestion = {
 +      placeId,
 +      mainText,
 +      secondaryText: asString(prediction.structuredFormat?.secondaryText?.text),
-+    });
++    };
++    // Offsets refer to the untrimmed structured text, so only trust them when nothing was trimmed
++    const rawMainText = prediction.structuredFormat?.mainText?.text;
++    if (structuredMainText && rawMainText === structuredMainText) {
++      const matches = mapMatches(prediction.structuredFormat?.mainText?.matches, mainText.length);
++      if (matches.length) suggestionEntry.mainTextMatches = matches;
++    }
++    result.push(suggestionEntry);
 +    if (result.length >= MAX_SUGGESTIONS) break;
 +  }
 +  return result;
@@ -2045,15 +2343,16 @@ index 0000000..1e2b047
 +}
 diff --git a/packages/lib/server/places/handlers.test.ts b/packages/lib/server/places/handlers.test.ts
 new file mode 100644
-index 0000000..30ffd47
+index 0000000..ad79a4c
 --- /dev/null
 +++ b/packages/lib/server/places/handlers.test.ts
-@@ -0,0 +1,272 @@
+@@ -0,0 +1,322 @@
 +// @vitest-environment node
 +import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 +
 +import { HttpError } from "@calcom/lib/http-error";
 +
++import { mapAutocompleteResponse } from "./googlePlacesClient";
 +import { handleAutocompleteRequest, handleDetailsRequest, resetPlacesCachesForTests } from "./handlers";
 +import { resetRateLimiterForTests } from "./inMemoryRateLimiter";
 +
@@ -2077,7 +2376,8 @@ index 0000000..30ffd47
 +        types: ["plumber", "point_of_interest", "establishment"],
 +        text: { text: "Acme Plumbing, 1 Main St, Austin, TX, USA" },
 +        structuredFormat: {
-+          mainText: { text: "Acme Plumbing" },
++          // Protobuf JSON omits startOffset when it is 0
++          mainText: { text: "Acme Plumbing", matches: [{ endOffset: 4 }] },
 +          secondaryText: { text: "1 Main St, Austin, TX, USA" },
 +        },
 +      },
@@ -2162,7 +2462,12 @@ index 0000000..30ffd47
 +    expect(result.body).toEqual({
 +      enabled: true,
 +      suggestions: [
-+        { placeId: PLACE_ID, mainText: "Acme Plumbing", secondaryText: "1 Main St, Austin, TX, USA" },
++        {
++          placeId: PLACE_ID,
++          mainText: "Acme Plumbing",
++          secondaryText: "1 Main St, Austin, TX, USA",
++          mainTextMatches: [{ start: 0, end: 4 }],
++        },
 +      ],
 +    });
 +
@@ -2319,6 +2624,49 @@ index 0000000..30ffd47
 +    }
 +    const limited = await handleDetailsRequest({ placeId: PLACE_ID, searchParams: params({}), clientKey: "d6" });
 +    expect(limited.status).toBe(429);
++  });
++});
++
++describe("mapAutocompleteResponse match ranges", () => {
++  const prediction = (mainText: Record<string, unknown>) => ({
++    suggestions: [
++      {
++        placePrediction: {
++          placeId: PLACE_ID,
++          types: ["establishment"],
++          structuredFormat: { mainText, secondaryText: { text: "Austin, TX, USA" } },
++        },
++      },
++    ],
++  });
++
++  it("maps several ranges", () => {
++    const [suggestion] = mapAutocompleteResponse(
++      prediction({
++        text: "Acme Plumbing Co",
++        matches: [{ endOffset: 4 }, { startOffset: 5, endOffset: 9 }],
++      })
++    );
++    expect(suggestion.mainTextMatches).toEqual([
++      { start: 0, end: 4 },
++      { start: 5, end: 9 },
++    ]);
++  });
++
++  it("drops out-of-range or malformed ranges", () => {
++    const [suggestion] = mapAutocompleteResponse(
++      prediction({
++        text: "Acme",
++        matches: [{ startOffset: 2, endOffset: 99 }, { startOffset: 3, endOffset: 1 }, "x", { endOffset: "4" }],
++      })
++    );
++    expect(suggestion.mainTextMatches).toBeUndefined();
++  });
++
++  it("ignores ranges when the text had to be trimmed", () => {
++    const [suggestion] = mapAutocompleteResponse(prediction({ text: "  Acme", matches: [{ endOffset: 2 }] }));
++    expect(suggestion.mainText).toBe("Acme");
++    expect(suggestion.mainTextMatches).toBeUndefined();
 +  });
 +});
 diff --git a/packages/lib/server/places/handlers.ts b/packages/lib/server/places/handlers.ts
